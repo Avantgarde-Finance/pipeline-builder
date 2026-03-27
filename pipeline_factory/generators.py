@@ -165,7 +165,6 @@ frameworkVersion: "^3"
 provider:
   name: aws
   region: {region}
-  stage: ${{sls:stage}}
   architecture: {arch}
   logRetentionInDays: 30
   tracing:
@@ -274,6 +273,7 @@ aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION"
 echo "▶  Building image ($IMAGE_TAG) for {platform}..."
 docker buildx build \\
   --platform {platform} \\
+  --provenance=false \\
   --tag "$ECR_URI:$IMAGE_TAG" \\
   --tag "$ECR_URI:latest" \\
   --push \\
@@ -319,9 +319,13 @@ COMMENT ON TABLE "{schema}"."{table}" IS '{cfg["pipeline_name"]} output';
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_github_deploy_ecr(cfg: dict) -> str:
+    region = cfg['aws_region']
+    account = cfg['aws_account_id']
+    repo = cfg['ecr_repo_name']
+    arch = cfg['architecture']
+    platform = "linux/amd64" if arch == "x86_64" else "linux/arm64"
     return f"""\
 # 1-deploy-ecr.yml — Build Docker image and push to ECR
-# Run this first on a new pipeline, then whenever handler.py changes
 name: 1 · Deploy ECR Image
 
 on:
@@ -336,7 +340,7 @@ on:
     paths: ["lambda/**", "Dockerfile"]
 
 permissions:
-  id-token: write   # OIDC — no static AWS keys
+  id-token: write
   contents: read
 
 jobs:
@@ -349,7 +353,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: {cfg['aws_region']}
+          aws-region: {region}
 
       - name: Set image tag
         id: tag
@@ -357,16 +361,51 @@ jobs:
           TAG="${{{{ github.event.inputs.image_tag || github.sha }}}}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Log in to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repo if it doesn't exist
+        run: |
+          aws ecr describe-repositories --repository-names {repo} --region {region} >/dev/null 2>&1 || \\
+          aws ecr create-repository --repository-name {repo} --region {region} \\
+            --image-scanning-configuration scanOnPush=true >/dev/null
+
+      - name: Set ECR resource policy (allow Lambda to pull)
+        run: |
+          aws ecr set-repository-policy \\
+            --repository-name {repo} \\
+            --region {region} \\
+            --policy-text '{{
+              "Version": "2012-10-17",
+              "Statement": [{{
+                "Sid": "LambdaECRImageAccess",
+                "Effect": "Allow",
+                "Principal": {{"Service": "lambda.amazonaws.com"}},
+                "Action": [
+                  "ecr:GetDownloadUrlForLayer",
+                  "ecr:BatchGetImage",
+                  "ecr:BatchCheckLayerAvailability"
+                ]
+              }}]
+            }}'
 
       - name: Build and push to ECR
-        run: |
-          chmod +x build.sh
-          IMAGE_TAG=${{{{ steps.tag.outputs.tag }}}} ./build.sh
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: {platform}
+          provenance: false
+          tags: |
+            {account}.dkr.ecr.{region}.amazonaws.com/{repo}:${{{{ steps.tag.outputs.tag }}}}
+            {account}.dkr.ecr.{region}.amazonaws.com/{repo}:latest
 
-      - name: Output image tag for downstream workflows
-        run: echo "IMAGE_TAG=${{{{ steps.tag.outputs.tag }}}}" >> $GITHUB_STEP_SUMMARY
+      - name: Summary
+        run: |
+          echo "### ✅ ECR image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "Tag: ${{{{ steps.tag.outputs.tag }}}}" >> $GITHUB_STEP_SUMMARY
+          echo "Use this tag when running workflow 2b to deploy prod." >> $GITHUB_STEP_SUMMARY
 """
 
 
@@ -512,15 +551,30 @@ jobs:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_github_apply_migration(cfg: dict) -> str:
-    table = cfg["db_table"]
+    table  = cfg["db_table"]
+    region = cfg["aws_region"]
+    stage  = cfg["stage"]
+    slug   = cfg["slug"]
+    schema = cfg["db_schema"]
     return f"""\
 # 3-apply-migration.yml — Run psql migration against Postgres
-# Run once on first deploy, or when adding new tables
+#
+# One-time secret setup in AWS Secrets Manager:
+#   Name: {slug}/staging/creds   (and {slug}/{stage}/creds for prod)
+#   Type: Other → Key/value pairs
+#   Keys: db-host, db-port, db-name, db-user, db-password
+#
 name: 3 · Apply Migration
 
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, {stage}]
+        default: staging
       confirm_table:
         description: "Type the target table name to confirm: {table}"
         required: true
@@ -540,22 +594,51 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: {cfg['aws_region']}
+          aws-region: {region}
 
-      - name: Fetch DB URL from SSM
+      - name: Fetch DB credentials from Secrets Manager
         id: db
         run: |
-          DB_URL=$(aws ssm get-parameter \\
-            --name "/app/{cfg['stage']}/database-url" \\
-            --with-decryption --query "Parameter.Value" --output text)
-          echo "::add-mask::$DB_URL"
-          echo "url=$DB_URL" >> $GITHUB_OUTPUT
+          ENV="${{{{ github.event.inputs.environment }}}}"
+          SECRET=$(aws secretsmanager get-secret-value \\
+            --secret-id "{slug}/$ENV/creds" \\
+            --query SecretString \\
+            --output text \\
+            --region {region})
+          DB_HOST=$(echo "$SECRET" | jq -r '.db_host')
+          DB_PORT=$(echo "$SECRET" | jq -r '.db_port')
+          DB_NAME=$(echo "$SECRET" | jq -r '.db_name')
+          DB_USER=$(echo "$SECRET" | jq -r '.db_user')
+          DB_PASS=$(echo "$SECRET" | jq -r '.db_password')
+          echo "::add-mask::$DB_PASS"
+          printf '%s' "$DB_PASS" > /tmp/pgpass
+          chmod 600 /tmp/pgpass
+          echo "host=$DB_HOST" >> $GITHUB_OUTPUT
+          echo "port=$DB_PORT" >> $GITHUB_OUTPUT
+          echo "name=$DB_NAME" >> $GITHUB_OUTPUT
+          echo "user=$DB_USER" >> $GITHUB_OUTPUT
 
       - name: Apply migration
-        run: psql "${{{{ steps.db.outputs.url }}}}" -f migrations/V001__create_{table}.sql -v ON_ERROR_STOP=1
+        env:
+          PGHOST: ${{{{ steps.db.outputs.host }}}}
+          PGPORT: ${{{{ steps.db.outputs.port }}}}
+          PGDATABASE: ${{{{ steps.db.outputs.name }}}}
+          PGUSER: ${{{{ steps.db.outputs.user }}}}
+          PGSSLMODE: require
+        run: |
+          export PGPASSWORD=$(cat /tmp/pgpass)
+          psql -f migrations/V001__create_{table}.sql -v ON_ERROR_STOP=1
 
-      - name: Verify
-        run: psql "${{{{ steps.db.outputs.url }}}}" -c "\\d {cfg['db_schema']}.{table}"
+      - name: Verify table exists
+        env:
+          PGHOST: ${{{{ steps.db.outputs.host }}}}
+          PGPORT: ${{{{ steps.db.outputs.port }}}}
+          PGDATABASE: ${{{{ steps.db.outputs.name }}}}
+          PGUSER: ${{{{ steps.db.outputs.user }}}}
+          PGSSLMODE: require
+        run: |
+          export PGPASSWORD=$(cat /tmp/pgpass)
+          psql -c "\\d {schema}.{table}"
 """
 
 
@@ -638,6 +721,7 @@ Resources:
                   - ssm:GetParameter
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
+                  - secretsmanager:GetSecretValue
                 Resource: "*"
 
 Outputs:
