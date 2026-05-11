@@ -196,6 +196,8 @@ if "db_columns" not in st.session_state:
     ]
 if "sel" not in st.session_state:
     st.session_state.sel = {}
+if "helper_dirs" not in st.session_state:
+    st.session_state.helper_dirs = []  # ordered list of subdirectory names the user created
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -459,31 +461,73 @@ requests>=2.31.0
     st.markdown("#### 📎 Helper Files")
     st.markdown(
         '<div class="info-box">'
-        'Upload any additional Python modules, config files, or scripts. '
-        'These land in <code>lambda/</code> alongside <code>handler.py</code> and are '
-        'built into the Docker image — import them with '
-        '<code>from db import get_connection</code>.'
+        'Create named subdirectories below, then upload files into each one. '
+        'Files under <b>lambda/ root</b> sit directly alongside <code>handler.py</code>. '
+        'Each directory gets its own <code>COPY</code> layer in the Dockerfile — '
+        'e.g. a <code>utils/</code> dir imports as <code>from utils.db import ...</code>.'
         '</div>',
         unsafe_allow_html=True,
     )
 
-    uploaded_helpers = st.file_uploader(
-        "Upload helper files (e.g. db.py, utils.py, config.json, abi.json, queries.sql)",
+    # ── Root-level helper files ────────────────────────────────────────────────
+    st.markdown("**📂 `lambda/` root** — same level as `handler.py`")
+    root_helper_files = st.file_uploader(
+        "Upload files to place directly in lambda/",
         accept_multiple_files=True,
         type=["py", "json", "yaml", "yml", "env", "sql", "txt", "sh"],
-        key="helper_files",
+        key="files_root",
     )
 
-    if uploaded_helpers:
-        chips_html = "".join(
-            [f'<span class="file-chip">📄 lambda/{f.name}</span>' for f in uploaded_helpers]
+    st.markdown("---")
+
+    # ── Directory management ───────────────────────────────────────────────────
+    st.markdown("**📁 Subdirectories**")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.text_input(
+            "New directory name",
+            key="new_dir_input",
+            placeholder="e.g. utils, models, abi",
         )
-        st.markdown(f'<div style="margin:8px 0;">{chips_html}</div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("＋ Create directory"):
+            name = st.session_state.new_dir_input.strip("/").strip()
+            if name and name not in st.session_state.helper_dirs:
+                st.session_state.helper_dirs.append(name)
+                st.rerun()
+
+    for i, dir_name in enumerate(list(st.session_state.helper_dirs)):
+        with st.expander(f"📁  lambda/{dir_name}/", expanded=True):
+            st.caption(f"Files here import as `from {dir_name}.module import ...`")
+            st.file_uploader(
+                f"Upload files for lambda/{dir_name}/",
+                accept_multiple_files=True,
+                type=["py", "json", "yaml", "yml", "env", "sql", "txt", "sh"],
+                key=f"files_dir_{dir_name}",
+            )
+            if st.button(f"✕  Remove lambda/{dir_name}/", key=f"rm_dir_{i}"):
+                st.session_state.helper_dirs.pop(i)
+                st.rerun()
+
+    # ── Collect all helper file assignments ────────────────────────────────────
+    all_helper_assignments: list[dict] = []
+    for f in (root_helper_files or []):
+        all_helper_assignments.append({"file": f, "name": f.name, "dir": ""})
+    for dir_name in st.session_state.helper_dirs:
+        for f in (st.session_state.get(f"files_dir_{dir_name}") or []):
+            all_helper_assignments.append({"file": f, "name": f.name, "dir": dir_name})
+
+    if all_helper_assignments:
         st.markdown(
-            '<div class="success-box">'
-            '✅ These will be copied into <code>lambda/</code> in the generated repo '
-            'and built into the Docker image.'
-            '</div>',
+            '<div class="success-box" style="margin-top:10px;">'
+            + "".join(
+                f'<span class="file-chip">📄 lambda/'
+                f'{"" if not e["dir"] else e["dir"] + "/"}{e["name"]}</span>'
+                for e in all_helper_assignments
+            )
+            + "<br>✅ Each directory gets its own <code>COPY</code> layer in the Dockerfile."
+            "</div>",
             unsafe_allow_html=True,
         )
     else:
@@ -579,6 +623,12 @@ requests>=2.31.0
         unsafe_allow_html=True,
     )
 
+    # Build helper file assignment list for generators (file objects stripped — just name+dir)
+    helper_file_assignments = [
+        {"name": e["name"], "dir": e["dir"]}
+        for e in all_helper_assignments
+    ]
+
     config = {
         "slug":                slug,
         "pipeline_name":       pipeline_name,
@@ -608,14 +658,34 @@ requests>=2.31.0
         "db_schema":           db_schema,
         "db_table":            db_table,
         "db_columns":          st.session_state.db_columns,
+        "helper_file_assignments": helper_file_assignments,
     }
 
-    # File tree preview
-    helper_lines = "".join([
-        f'│&nbsp;&nbsp;&nbsp;├── <span class="key">{f.name}</span>'
-        f' &nbsp;<span class="muted">← helper</span><br>'
-        for f in (uploaded_helpers or [])
-    ])
+    # File tree preview — group helpers by directory
+    helper_lines = ""
+    if all_helper_assignments:
+        dirs_seen: dict[str, list[str]] = {}
+        root_helpers_preview: list[str] = []
+        for e in all_helper_assignments:
+            d = e["dir"]
+            if d:
+                dirs_seen.setdefault(d, []).append(e["name"])
+            else:
+                root_helpers_preview.append(e["name"])
+        for fname in root_helpers_preview:
+            helper_lines += (
+                f'│&nbsp;&nbsp;&nbsp;├── <span class="key">{fname}</span>'
+                f' &nbsp;<span class="muted">← helper</span><br>'
+            )
+        for d, files in sorted(dirs_seen.items()):
+            helper_lines += f'│&nbsp;&nbsp;&nbsp;├── <span class="dir">{d}/</span><br>'
+            for i, fname in enumerate(files):
+                connector = "└──" if i == len(files) - 1 else "├──"
+                helper_lines += (
+                    f'│&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;{connector} '
+                    f'<span class="key">{fname}</span>'
+                    f' &nbsp;<span class="muted">← helper</span><br>'
+                )
     migration_line = (
         f'├── migrations/<br>'
         f'│&nbsp;&nbsp;&nbsp;└── <span class="key">V001__create_{db_table or "table"}.sql</span><br>'
@@ -632,8 +702,8 @@ requests>=2.31.0
 ├── <span class="key">Dockerfile</span><br>
 ├── <span class="key">build.sh</span><br>
 {migration_line}├── .github/workflows/<br>
-│&nbsp;&nbsp;&nbsp;├── <span class="key">1-deploy-ecr.yml</span> &nbsp;<span class="muted">← build + push image</span><br>
-│&nbsp;&nbsp;&nbsp;├── <span class="key">2a-deploy-staging.yml</span> &nbsp;<span class="muted">← auto on push to main</span><br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">1-deploy-ecr.yml</span> &nbsp;<span class="muted">← build + push image (manual)</span><br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">2a-deploy-staging.yml</span> &nbsp;<span class="muted">← manual trigger only</span><br>
 │&nbsp;&nbsp;&nbsp;├── <span class="key">2b-deploy-prod.yml</span> &nbsp;<span class="muted">← manual trigger only</span><br>
 {"│&nbsp;&nbsp;&nbsp;└── <span class='key'>3-apply-migration.yml</span><br>" if create_migration else ""}└── README.md
 </div>
@@ -683,9 +753,12 @@ requests>=2.31.0
                     generate_github_apply_migration(cfg),
                 )
             zf.writestr(f"{base}/README.md", generate_readme(cfg))
-            for f in (uploaded_helpers or []):
+            for e in all_helper_assignments:
+                f = e["file"]
+                d = e["dir"]
+                zip_path = f"{base}/lambda/{d}/{f.name}" if d else f"{base}/lambda/{f.name}"
                 f.seek(0)
-                zf.writestr(f"{base}/lambda/{f.name}", f.read())
+                zf.writestr(zip_path, f.read())
         buf.seek(0)
         return buf.read()
 
@@ -704,9 +777,9 @@ requests>=2.31.0
 <b>Quick start after download:</b><br>
 1. &nbsp;<code>IMAGE_TAG=$(git rev-parse --short HEAD) ./build.sh</code> &nbsp;→ push image to ECR<br>
 2. &nbsp;<code>npm i -g serverless && sls deploy --stage staging</code> &nbsp;→ deploy staging first<br>
-3. &nbsp;<code>sls deploy --stage prod</code> &nbsp;→ deploy prod (or let GitHub Actions handle it)<br>
+3. &nbsp;<code>sls deploy --stage prod</code> &nbsp;→ deploy prod when staging looks good<br>
 4. &nbsp;(if RDS) <code>psql $DB_URL -f migrations/V001__*.sql</code><br><br>
-Or push to GitHub and run workflows 1 → 2 → 3 — staging deploys automatically, prod requires approval.
+Or push to GitHub and run workflows 1 → 2a → 2b manually from the Actions tab. Nothing deploys automatically.
 </div>
 """, unsafe_allow_html=True)
 
@@ -889,8 +962,9 @@ your required reviewers. Nobody touches prod until someone clicks Approve.
     st.markdown("""
 | # | Workflow | Trigger | What it does |
 |---|---|---|---|
-| 1 | **Deploy ECR Image** | Push to `main` (lambda/ or Dockerfile changed) | Builds Docker image → pushes to ECR |
-| 2 | **Deploy → staging → prod** | Push to `main` (any file) | Auto-deploys staging → smoke tests → waits for approval → deploys prod |
+| 1 | **Deploy ECR Image** | Manual only | Builds Docker image → pushes to ECR |
+| 2a | **Deploy → staging** | Manual only | Deploys to staging + smoke test |
+| 2b | **Deploy → prod** | Manual only | Deploys to prod after staging looks good |
 | 3 | **Apply Migration** | Manual only (first deploy or new tables) | Runs `psql` migration against Postgres |
 """)
 
@@ -906,10 +980,10 @@ Workflow 3 needs the Lambda deployed first so the DB connection details are avai
     st.markdown("""
 <div class="cicd-step">
   <div class="cicd-step-num">7</div>
-  <div class="cicd-step-title">Day-to-day deploys — the full automated flow</div>
+  <div class="cicd-step-title">Day-to-day deploys — fully manual, fully intentional</div>
   <div class="cicd-step-body">
-    Push to main. GitHub Actions handles staging automatically. You (or a teammate)
-    get a notification and click Approve when ready to go to prod.
+    Push your changes to GitHub, then trigger each workflow manually from the Actions tab.
+    No surprises — nothing touches staging or prod unless you kick it off.
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -919,13 +993,11 @@ git add lambda/handler.py
 git commit -m "fix: handle null block response"
 git push origin main
 
-# What happens automatically:
-# ① Docker image built + pushed to ECR             (~2 min)
-# ② sls deploy --stage staging                     (~1 min)
-# ③ smoke test: sls invoke --stage staging         (instant)
-# ④ ⏸  GitHub sends approval notification to reviewers
-# ⑤ Reviewer opens GitHub Actions → clicks Approve
-# ⑥ sls deploy --stage prod                        (~1 min) 🚀""",
+# Then in GitHub → Actions tab, run in order:
+# ① Workflow 1 · Deploy ECR Image     → builds + pushes Docker image (~2 min)
+# ② Workflow 2a · Deploy → staging    → sls deploy --stage staging + smoke test (~1 min)
+# ③ Check staging looks good
+# ④ Workflow 2b · Deploy → prod       → paste the image tag from step ① (~1 min) 🚀""",
         language="bash",
     )
 

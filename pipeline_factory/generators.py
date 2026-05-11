@@ -219,6 +219,26 @@ functions:
 def generate_dockerfile(cfg: dict) -> str:
     runtime = cfg["python_runtime"]
     py_ver  = runtime.replace("python", "")
+
+    helper_assignments = cfg.get("helper_file_assignments", [])
+
+    # Split helpers into root-level files and sub-directory groups
+    root_helpers = [e["name"] for e in helper_assignments if not e.get("dir", "").strip("/")]
+    dir_helpers: dict[str, list[str]] = {}
+    for e in helper_assignments:
+        d = e.get("dir", "").strip("/")
+        if d:
+            dir_helpers.setdefault(d, []).append(e["name"])
+
+    # Build explicit COPY statements — one per file at root, one per directory for subdirs
+    copy_lines = ["# Copy handler + helper files", "COPY lambda/handler.py ."]
+    for fname in root_helpers:
+        copy_lines.append(f"COPY lambda/{fname} .")
+    for d in sorted(dir_helpers):
+        copy_lines.append(f"COPY lambda/{d}/ ./{d}/")
+
+    copy_block = "\n".join(copy_lines)
+
     return f"""\
 # ─────────────────────────────────────────────────────────────────────────────
 # {cfg['slug']} Lambda — Docker image  (Python {py_ver})
@@ -233,8 +253,7 @@ WORKDIR ${{LAMBDA_TASK_ROOT}}
 COPY lambda/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy handler + any helper files in lambda/
-COPY lambda/ .
+{copy_block}
 
 CMD ["handler.handler"]
 """
@@ -335,9 +354,6 @@ on:
         description: "Image tag (defaults to git SHA)"
         required: false
         default: ""
-  push:
-    branches: [main]
-    paths: ["lambda/**", "Dockerfile"]
 
 permissions:
   id-token: write
@@ -422,14 +438,11 @@ def generate_github_deploy_staging(cfg: dict) -> str:
     region = cfg['aws_region']
     return f"""\
 # 2a-deploy-staging.yml
-# Triggers automatically on every push to main.
-# Deploys to staging and smoke tests. If this passes, run 2b manually to go to prod.
-name: 2a · Deploy → staging (auto)
+# Manually triggered from GitHub Actions → Run workflow.
+# Deploys to staging and smoke tests. If this passes, run 2b to go to prod.
+name: 2a · Deploy → staging (manual)
 
 on:
-  push:
-    branches: [main]
-    paths: ["lambda/**", "Dockerfile", "serverless.yml"]
   workflow_dispatch:
     inputs:
       image_tag:
