@@ -1,1630 +1,713 @@
 """
-Pipeline Builder — Streamlit UI to scaffold and generate deployable AWS pipeline repos.
+Pipeline Builder — Serverless Framework Edition (v2)
+Component-first approach: pick your AWS building blocks, then configure them.
 """
 
 import io
-import json
 import re
-import textwrap
 import zipfile
-from datetime import datetime
-from pathlib import Path
-
 import streamlit as st
-
-# ─── Page config ──────────────────────────────────────────────────────────────
-
-st.set_page_config(
-    page_title="Pipeline Builder",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from generators import (
+    generate_serverless_yml,
+    generate_dockerfile,
+    generate_buildsh,
+    generate_migration_sql,
+    generate_github_deploy_ecr,
+    generate_github_deploy_staging,
+    generate_github_deploy_prod,
+    generate_github_apply_migration,
+    generate_github_oidc_role_cfn,
+    generate_readme,
 )
 
-# ─── Theme / CSS ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Pipeline Builder · Serverless",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;800&display=swap');
-
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap');
 :root {
-    --bg:      #0a0c10;
-    --bg2:     #10141c;
-    --bg3:     #181e2a;
-    --border:  #1e2a3a;
-    --accent:  #00d4ff;
-    --accent2: #7c3aed;
-    --green:   #10b981;
-    --amber:   #f59e0b;
-    --red:     #ef4444;
-    --text:    #e2e8f0;
-    --muted:   #64748b;
-    --mono:    'JetBrains Mono', monospace;
-    --sans:    'Syne', sans-serif;
+    --bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;--accent:#7c3aed;
+    --accent-glow:rgba(124,58,237,0.25);--green:#10b981;--amber:#f59e0b;
+    --blue:#3b82f6;--text:#e2e8f0;--muted:#64748b;
 }
-
-html, body, [data-testid="stAppViewContainer"] {
-    background: var(--bg) !important;
-    color: var(--text) !important;
-    font-family: var(--sans) !important;
-}
-
-/* Sidebar */
-[data-testid="stSidebar"] {
-    background: var(--bg2) !important;
-    border-right: 1px solid var(--border) !important;
-}
-[data-testid="stSidebar"] * { color: var(--text) !important; }
-
-/* Inputs */
-input, textarea, select, [data-baseweb="input"] input,
-[data-baseweb="textarea"] textarea, [data-baseweb="select"] div {
-    background: var(--bg3) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-    color: var(--text) !important;
-    font-family: var(--mono) !important;
-    font-size: 13px !important;
-}
-input:focus, textarea:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 1px var(--accent) !important;
-    outline: none !important;
-}
-
-/* Buttons */
-.stButton > button {
-    background: transparent !important;
-    border: 1px solid var(--accent) !important;
-    color: var(--accent) !important;
-    font-family: var(--mono) !important;
-    font-size: 13px !important;
-    font-weight: 600 !important;
-    padding: 8px 20px !important;
-    border-radius: 4px !important;
-    letter-spacing: 0.05em !important;
-    transition: all 0.15s !important;
-}
-.stButton > button:hover {
-    background: var(--accent) !important;
-    color: var(--bg) !important;
-}
-
-/* Primary button */
-.stButton > button[kind="primary"],
-div[data-testid="stFormSubmitButton"] > button {
-    background: var(--accent) !important;
-    color: var(--bg) !important;
-    border: none !important;
-    font-weight: 700 !important;
-}
-.stButton > button[kind="primary"]:hover {
-    background: #00b8d9 !important;
-}
-
-/* Download button */
-.stDownloadButton > button {
-    background: var(--green) !important;
-    border: none !important;
-    color: #000 !important;
-    font-family: var(--mono) !important;
-    font-size: 14px !important;
-    font-weight: 700 !important;
-    padding: 12px 28px !important;
-    border-radius: 4px !important;
-    letter-spacing: 0.05em !important;
-    width: 100% !important;
-}
-
-/* Selectbox */
-[data-baseweb="select"] {
-    background: var(--bg3) !important;
-}
-[data-baseweb="popover"] {
-    background: var(--bg2) !important;
-    border: 1px solid var(--border) !important;
-}
-
-/* Slider */
-[data-baseweb="slider"] [role="slider"] {
-    background: var(--accent) !important;
-}
-
-/* Checkbox */
-[data-testid="stCheckbox"] label { font-family: var(--mono) !important; font-size: 13px !important; }
-
-/* Expander */
-[data-testid="stExpander"] {
-    background: var(--bg2) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
-}
-
-/* Tabs */
-[data-baseweb="tab-list"] { background: transparent !important; border-bottom: 1px solid var(--border) !important; }
-[data-baseweb="tab"] { font-family: var(--mono) !important; font-size: 13px !important; }
-[aria-selected="true"][data-baseweb="tab"] { color: var(--accent) !important; border-bottom: 2px solid var(--accent) !important; }
-
-/* Alerts */
-[data-testid="stSuccess"] { background: rgba(16,185,129,0.1) !important; border: 1px solid var(--green) !important; border-radius: 6px !important; }
-[data-testid="stInfo"]    { background: rgba(0,212,255,0.08) !important; border: 1px solid var(--accent) !important; border-radius: 6px !important; }
-[data-testid="stWarning"] { background: rgba(245,158,11,0.1) !important; border: 1px solid var(--amber) !important; border-radius: 6px !important; }
-
-/* Code */
-code, pre { font-family: var(--mono) !important; background: var(--bg3) !important; border-radius: 4px !important; }
-
-/* Labels */
-label, .stSelectbox label, .stTextInput label, .stTextArea label, .stSlider label, .stCheckbox label {
-    font-family: var(--mono) !important;
-    font-size: 12px !important;
-    font-weight: 600 !important;
-    color: var(--muted) !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
-}
-
-/* Radio */
-[data-testid="stRadio"] label { font-family: var(--mono) !important; font-size: 13px !important; text-transform: none !important; letter-spacing: 0 !important; color: var(--text) !important; }
-
-/* Metric */
-[data-testid="stMetric"] { background: var(--bg2) !important; border: 1px solid var(--border) !important; border-radius: 8px !important; padding: 12px !important; }
-
-/* Number input */
-[data-testid="stNumberInput"] input { font-family: var(--mono) !important; }
-
-/* File uploader */
-[data-testid="stFileUploader"] {
-    background: var(--bg3) !important;
-    border: 1px dashed var(--border) !important;
-    border-radius: 8px !important;
-}
-
-/* Divider */
-hr { border-color: var(--border) !important; }
-
-/* Hide Streamlit branding */
-#MainMenu, footer, header { visibility: hidden; }
-
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;color:var(--text);font-family:'Syne',sans-serif;}
+[data-testid="stAppViewContainer"]::before{content:'';position:fixed;top:-40%;left:-20%;width:80vw;height:80vh;background:radial-gradient(ellipse,rgba(124,58,237,0.07) 0%,transparent 70%);pointer-events:none;z-index:0;}
+h1,h2,h3{font-family:'Syne',sans-serif!important;}
+.top-banner{background:linear-gradient(135deg,rgba(124,58,237,0.15),rgba(16,185,129,0.06));border:1px solid rgba(124,58,237,0.3);border-radius:14px;padding:22px 28px;margin-bottom:28px;}
+.step-header{display:flex;align-items:center;gap:14px;margin:32px 0 18px;padding-bottom:12px;border-bottom:1px solid var(--border);}
+.step-num{background:var(--accent);color:white;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;flex-shrink:0;}
+.step-title{font-weight:800;font-size:17px;letter-spacing:-0.3px;}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;background:rgba(124,58,237,0.2);color:#a78bfa;border:1px solid rgba(124,58,237,0.3);}
+.badge-green{background:rgba(16,185,129,0.15);color:#6ee7b7;border-color:rgba(16,185,129,0.3);}
+.badge-amber{background:rgba(245,158,11,0.15);color:#fcd34d;border-color:rgba(245,158,11,0.3);}
+.badge-blue{background:rgba(59,130,246,0.15);color:#93c5fd;border-color:rgba(59,130,246,0.3);}
+.info-box{background:rgba(124,58,237,0.07);border:1px solid rgba(124,58,237,0.22);border-radius:10px;padding:13px 17px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#c4b5fd;margin:10px 0;}
+.warn-box{background:rgba(245,158,11,0.07);border:1px solid rgba(245,158,11,0.25);border-radius:10px;padding:13px 17px;font-size:12px;color:#fcd34d;margin:10px 0;}
+.success-box{background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:13px 17px;font-size:12px;color:#6ee7b7;margin:10px 0;}
+.file-chip{display:inline-flex;align-items:center;gap:6px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.25);border-radius:6px;padding:4px 10px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#93c5fd;margin:3px;}
+.file-tree{background:#0d0d14;border:1px solid var(--border);border-radius:10px;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:2;color:var(--text);}
+.file-tree .dir{color:#7c3aed;font-weight:700;}
+.file-tree .key{color:#10b981;}
+.file-tree .muted{color:var(--muted);font-size:11px;}
+.cicd-step{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 20px 16px 52px;margin:8px 0;position:relative;}
+.cicd-step-num{position:absolute;left:16px;top:16px;background:var(--accent);color:white;width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;}
+.cicd-step-title{font-weight:700;font-size:14px;margin-bottom:6px;}
+.cicd-step-body{font-size:13px;color:#94a3b8;line-height:1.6;}
+.stTextInput>div>div>input,.stTextArea>div>div>textarea,.stSelectbox>div>div>div{background:var(--surface)!important;border:1px solid var(--border)!important;color:var(--text)!important;border-radius:8px!important;font-family:'JetBrains Mono',monospace!important;font-size:13px!important;}
+.stTextInput>div>div>input:focus,.stTextArea>div>div>textarea:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--accent-glow)!important;}
+.stButton>button{background:var(--accent)!important;color:white!important;border:none!important;border-radius:8px!important;font-family:'Syne',sans-serif!important;font-weight:700!important;font-size:13px!important;padding:9px 20px!important;transition:all 0.15s!important;}
+.stButton>button:hover{background:#6d28d9!important;transform:translateY(-1px)!important;}
+.stCheckbox>label{color:var(--text)!important;font-size:13px!important;}
+.stSelectbox label,.stTextInput label,.stTextArea label,.stSlider label,.stNumberInput label{color:var(--muted)!important;font-size:11px!important;font-family:'JetBrains Mono',monospace!important;text-transform:uppercase!important;letter-spacing:0.5px!important;}
+div[data-testid="stExpander"]{background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
+[data-testid="stTabs"] button{font-family:'JetBrains Mono',monospace!important;font-size:12px!important;color:var(--muted)!important;}
+[data-testid="stTabs"] button[aria-selected="true"]{color:var(--accent)!important;border-bottom-color:var(--accent)!important;}
+.stDownloadButton>button{background:linear-gradient(135deg,#10b981,#059669)!important;color:white!important;border:none!important;border-radius:10px!important;font-family:'Syne',sans-serif!important;font-weight:800!important;font-size:15px!important;padding:14px 32px!important;width:100%!important;box-shadow:0 4px 24px rgba(16,185,129,0.3)!important;}
+hr{border-color:var(--border)!important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Custom components ─────────────────────────────────────────────────────────
-
-def badge(text, color="#00d4ff"):
-    return f'<span style="background:rgba(0,212,255,0.1);border:1px solid {color};color:{color};font-family:JetBrains Mono,monospace;font-size:11px;font-weight:600;padding:2px 10px;border-radius:3px;letter-spacing:0.06em">{text}</span>'
-
-def section_header(title, subtitle=None):
-    st.markdown(f"""
-    <div style="margin-bottom:24px">
-        <h2 style="font-family:Syne,sans-serif;font-size:22px;font-weight:800;
-                   color:#e2e8f0;margin:0 0 4px 0;letter-spacing:-0.02em">{title}</h2>
-        {'<p style="font-family:JetBrains Mono,monospace;font-size:13px;color:#64748b;margin:0">' + subtitle + '</p>' if subtitle else ''}
+st.markdown("""
+<div class="top-banner">
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+    <div>
+      <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:24px;letter-spacing:-0.5px;">
+        ⚡ Pipeline Builder <span style="color:#7c3aed;">· Serverless Framework</span>
+      </div>
+      <div style="color:#64748b;font-family:'JetBrains Mono',monospace;font-size:11px;margin-top:5px;">
+        Pick your components → configure → generate a complete deployable repo
+      </div>
     </div>
-    """, unsafe_allow_html=True)
-
-def file_preview(filename, content, lang="python"):
-    st.markdown(f"""
-    <div style="background:#10141c;border:1px solid #1e2a3a;border-radius:8px;margin-bottom:12px">
-        <div style="padding:8px 14px;border-bottom:1px solid #1e2a3a;display:flex;align-items:center;gap:8px">
-            <span style="font-family:JetBrains Mono,monospace;font-size:12px;color:#00d4ff;font-weight:600">{filename}</span>
-        </div>
-        <pre style="margin:0;padding:14px;font-family:JetBrains Mono,monospace;
-                    font-size:12px;color:#94a3b8;overflow-x:auto;white-space:pre">{content[:1200]}{'...' if len(content)>1200 else ''}</pre>
+    <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+      <span class="badge-green badge">serverless.yml</span>
+      <span class="badge-amber badge">ECR + Lambda</span>
+      <span class="badge badge">staging → prod</span>
     </div>
-    """, unsafe_allow_html=True)
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-def step_pill(num, label, active=False, done=False):
-    if done:
-        col, lbl = "#10b981", "✓"
-        bg = "rgba(16,185,129,0.1)"
-        border = "#10b981"
-    elif active:
-        col, lbl = "#00d4ff", str(num)
-        bg = "rgba(0,212,255,0.1)"
-        border = "#00d4ff"
-    else:
-        col, lbl = "#64748b", str(num)
-        bg = "transparent"
-        border = "#1e2a3a"
-    return f"""
-    <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;
-                background:{bg};border:1px solid {border};border-radius:6px;
-                margin-bottom:6px;cursor:pointer">
-        <span style="width:22px;height:22px;background:{col};color:#0a0c10;
-                     border-radius:50%;display:flex;align-items:center;justify-content:center;
-                     font-family:JetBrains Mono,monospace;font-size:11px;font-weight:700;
-                     flex-shrink:0">{lbl}</span>
-        <span style="font-family:Syne,sans-serif;font-size:13px;font-weight:600;color:{'#e2e8f0' if (active or done) else '#64748b'}">{label}</span>
-    </div>
-    """
+tab_build, tab_cicd = st.tabs(["🔧  Build Pipeline", "🚀  CI/CD Setup Guide"])
 
-# ─── Session state ─────────────────────────────────────────────────────────────
+if "env_vars" not in st.session_state:
+    st.session_state.env_vars = []
+if "db_columns" not in st.session_state:
+    st.session_state.db_columns = [
+        {"name": "id",         "type": "BIGSERIAL",   "pk": True,  "nullable": False, "default": ""},
+        {"name": "created_at", "type": "TIMESTAMPTZ", "pk": False, "nullable": False, "default": "NOW()"},
+    ]
+if "sel" not in st.session_state:
+    st.session_state.sel = {}
 
-STEPS = [
-    "Basics",
-    "Components",
-    "Schedule",
-    "Lambda Config",
-    "Lambda Code",
-    "Database",
-    "Generate",
-]
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — BUILD PIPELINE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_build:
 
-def init_state():
-    defaults = {
-        "step": 0,
-        # Basics
-        "pipeline_name": "",
-        "pipeline_desc": "",
-        "aws_region": "us-east-1",
-        # Components
-        "use_eventbridge": True,
-        "use_sns": True,
-        "use_rds": True,
-        # Schedule
-        "schedule_mode": "rate",
-        "rate_value": 1,
-        "rate_unit": "hours",
-        "cron_minute": "0",
-        "cron_hour": "2",
-        "cron_dom": "*",
-        "cron_month": "*",
-        "cron_dow": "?",
-        # Lambda config
-        "runtime": "python3.12",
-        "memory_mb": 256,
-        "timeout_sec": 120,
-        "arch": "x86_64",
-        "env_vars": [],  # list of {"key": ..., "value": ..., "secret": bool}
-        # Lambda code
-        "handler_code": DEFAULT_HANDLER,
-        "helper_files": {},  # filename -> content str
-        "requirements": "psycopg2-binary==2.9.9\nrequests==2.31.0\n",
-        # Database
-        "db_table": "",
-        "db_schema": [],   # list of {"col", "type", "pk", "nullable", "default"}
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    # STEP 1 — Component Picker
+    st.markdown('<div class="step-header"><div class="step-num">1</div><div class="step-title">Choose Your Pipeline Components</div></div>', unsafe_allow_html=True)
+    st.markdown('<div style="color:#64748b;font-size:13px;margin-bottom:16px;">Select the AWS services you want in this pipeline. Lambda is always included as the compute layer.</div>', unsafe_allow_html=True)
 
-DEFAULT_HANDLER = '''\
-"""
-Pipeline handler — implement your logic in run_pipeline().
-"""
+    COMPONENTS = [
+        {"key": "lambda",        "icon": "λ",   "name": "Lambda",          "desc": "Python compute. Always included.",                          "required": True},
+        {"key": "eventbridge",   "icon": "⏰",  "name": "EventBridge",     "desc": "Schedule trigger (rate or cron)",                           "required": False},
+        {"key": "sns_trigger",   "icon": "📣",  "name": "SNS Trigger",     "desc": "Subscribe Lambda to an existing SNS topic",                 "required": False},
+        {"key": "sns_publisher", "icon": "📤",  "name": "SNS Publisher",   "desc": "Create staging + prod SNS topics, Lambda publishes to them", "required": False},
+        {"key": "sqs",           "icon": "📬",  "name": "SQS Queue",       "desc": "Queue trigger + batch processing",                          "required": False},
+        {"key": "api_gateway",   "icon": "🌐",  "name": "API Gateway",     "desc": "HTTP endpoint (HTTP API v2)",                               "required": False},
+        {"key": "sns_failure",   "icon": "🚨",  "name": "Failure Alerts",  "desc": "SNS topic for failed invocations",                          "required": False},
+        {"key": "rds",           "icon": "🗄️", "name": "Postgres / RDS",  "desc": "Target table + migration SQL",                              "required": False},
+        {"key": "s3",            "icon": "🪣",  "name": "S3",              "desc": "S3 read/write + IAM policy",                                "required": False},
+        {"key": "xray",          "icon": "🔍",  "name": "X-Ray Tracing",   "desc": "Distributed tracing for Lambda",                            "required": False},
+    ]
 
+    sel = {}
+    cols = st.columns(3)
+    for i, comp in enumerate(COMPONENTS):
+        with cols[i % 3]:
+            if comp["required"]:
+                st.checkbox(f"{comp['icon']}  **{comp['name']}** — *{comp['desc']}*", value=True, disabled=True, key=f"comp_req_{comp['key']}")
+                sel[comp["key"]] = True
+            else:
+                default = st.session_state.sel.get(comp["key"], False)
+                val = st.checkbox(f"{comp['icon']}  **{comp['name']}** — *{comp['desc']}*", value=default, key=f"comp_{comp['key']}")
+                sel[comp["key"]] = val
+
+    st.session_state.sel = sel
+    selected_names = [c["name"] for c in COMPONENTS if sel.get(c["key"])]
+    chips = "".join([f'<span class="badge" style="margin:2px;">{n}</span>' for n in selected_names])
+    st.markdown(f'<div style="margin-top:8px;"><span style="color:#64748b;font-size:11px;font-family:\'JetBrains Mono\',monospace;text-transform:uppercase;letter-spacing:0.5px;">Pipeline includes:</span> {chips}</div>', unsafe_allow_html=True)
+
+    # STEP 2 — Pipeline Identity
+    st.markdown('<div class="step-header"><div class="step-num">2</div><div class="step-title">Pipeline Identity</div></div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([2, 1.5, 1])
+    with c1:
+        pipeline_name = st.text_input("Pipeline name", value="arbitrum-block-fetcher")
+        slug = re.sub(r"[^a-z0-9-]", "-", pipeline_name.lower()).strip("-") or "my-pipeline"
+    with c2:
+        aws_region = st.selectbox("AWS Region", ["eu-west-1", "us-east-1", "us-west-2", "ap-southeast-1", "ap-northeast-1"])
+    with c3:
+        prod_stage = st.selectbox("Prod stage name", ["prod", "production", "main"])
+
+    c1, c2 = st.columns(2)
+    with c1: aws_account_id = st.text_input("AWS Account ID", value="289390447514")
+    with c2: ecr_repo_name  = st.text_input("ECR Repository name", value=slug)
+
+    # STEP 3 — Configure Triggers & Publishers
+    trigger_type      = "none"
+    schedule_expr     = ""
+    sns_topic_arn     = ""
+    sns_publisher_base    = ""
+    sns_publisher_suffix_staging = "_stg"
+    sns_publisher_suffix_prod    = ""
+    sqs_arn           = ""
+    sqs_batch_size    = 10
+    http_path         = "/run"
+    http_method       = "GET"
+
+    has_config = any(sel.get(k) for k in ["eventbridge", "sns_trigger", "sns_publisher", "sqs", "api_gateway"])
+    if has_config:
+        st.markdown('<div class="step-header"><div class="step-num">3</div><div class="step-title">Configure Trigger(s) & Publishers</div></div>', unsafe_allow_html=True)
+
+        if sel.get("eventbridge"):
+            st.markdown("##### ⏰ EventBridge Schedule")
+            trigger_type = "schedule"
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                schedule_mode = st.radio("Mode", ["Rate", "Cron"], horizontal=True)
+            with c2:
+                if schedule_mode == "Rate":
+                    r1, r2 = st.columns(2)
+                    with r1: rate_val  = st.number_input("Every N", min_value=1, value=1)
+                    with r2: rate_unit = st.selectbox("Unit", ["hour", "hours", "day", "days", "minute", "minutes"])
+                    schedule_expr = f"rate({rate_val} {rate_unit})"
+                else:
+                    c1b, c2b, c3b, c4b, c5b = st.columns(5)
+                    with c1b: m   = st.text_input("Min",  "0")
+                    with c2b: h   = st.text_input("Hour", "2")
+                    with c3b: dom = st.text_input("DoM",  "*")
+                    with c4b: mon = st.text_input("Mon",  "*")
+                    with c5b: dow = st.text_input("DoW",  "?")
+                    schedule_expr = f"cron({m} {h} {dom} {mon} {dow} *)"
+            st.markdown(f'<div class="info-box">serverless.yml event: <b>schedule: {schedule_expr}</b></div>', unsafe_allow_html=True)
+
+        if sel.get("sns_trigger"):
+            st.markdown("##### 📣 SNS Trigger — subscribe to an existing topic")
+            if trigger_type == "none":
+                trigger_type = "sns"
+            sns_topic_arn = st.text_input(
+                "Existing SNS Topic ARN",
+                value=f"arn:aws:sns:{aws_region}:{aws_account_id}:my-existing-topic",
+                help="Lambda subscribes to this topic. Same ARN used for all stages.",
+            )
+            st.markdown('<div class="info-box">The topic already exists — Serverless just wires up the subscription.</div>', unsafe_allow_html=True)
+
+        if sel.get("sns_publisher"):
+            st.markdown("##### 📤 SNS Publisher — create staging + prod topics, Lambda publishes to them")
+            c1, c2, c3 = st.columns([3, 1.5, 1.5])
+            with c1:
+                sns_publisher_base = st.text_input(
+                    "Base topic name",
+                    value="my-pipeline-events",
+                    help="Serverless creates {base}{suffix} for each stage",
+                )
+            with c2:
+                sns_publisher_suffix_staging = st.text_input(
+                    "Staging suffix",
+                    value="_stg",
+                    help="e.g. my-pipeline-events_stg",
+                )
+            with c3:
+                sns_publisher_suffix_prod = st.text_input(
+                    "Prod suffix",
+                    value="",
+                    help="Usually empty — e.g. my-pipeline-events",
+                )
+
+            staging_topic = f"{sns_publisher_base}{sns_publisher_suffix_staging}"
+            prod_topic    = f"{sns_publisher_base}{sns_publisher_suffix_prod}" if sns_publisher_suffix_prod else sns_publisher_base
+            st.markdown(f"""
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0;">
+  <div class="info-box">
+    <span style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;">Staging creates</span><br>
+    <b>{staging_topic}</b>
+  </div>
+  <div class="info-box" style="background:rgba(16,185,129,0.07);border-color:rgba(16,185,129,0.25);color:#6ee7b7;">
+    <span style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;">Prod creates</span><br>
+    <b>{prod_topic}</b>
+  </div>
+</div>
+<div class="info-box">Serverless creates the topic for each stage and injects <code>SNS_TOPIC_ARN</code> as an env var so the Lambda knows where to publish.</div>
+""", unsafe_allow_html=True)
+
+        if sel.get("sqs"):
+            st.markdown("##### 📬 SQS Queue")
+            if trigger_type == "none": trigger_type = "sqs"
+            c1, c2 = st.columns(2)
+            with c1: sqs_arn        = st.text_input("SQS Queue ARN", f"arn:aws:sqs:{aws_region}:{aws_account_id}:my-queue")
+            with c2: sqs_batch_size = st.number_input("Batch size", 1, 10000, 10)
+
+        if sel.get("api_gateway"):
+            st.markdown("##### 🌐 API Gateway")
+            if trigger_type == "none": trigger_type = "http"
+            c1, c2 = st.columns(2)
+            with c1: http_path   = st.text_input("Path", "/run")
+            with c2: http_method = st.selectbox("Method", ["GET", "POST", "PUT", "DELETE"])
+
+    # STEP 4 — Lambda Config
+    st.markdown('<div class="step-header"><div class="step-num">4</div><div class="step-title">Lambda Configuration</div></div>', unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1: memory       = st.select_slider("Memory (MB)", options=[128, 256, 512, 1024, 2048, 3008, 4096, 8192, 10240], value=256)
+    with c2: timeout      = st.slider("Timeout (seconds)", 10, 900, 300)
+    with c3: architecture = st.selectbox("Architecture", ["x86_64", "arm64"])
+
+    c1, c2 = st.columns(2)
+    with c1: python_runtime       = st.selectbox("Python version", ["python3.12", "python3.11", "python3.10"])
+    with c2: reserved_concurrency = st.number_input("Reserved concurrency (-1 = unreserved)", min_value=-1, value=-1)
+    keep_warm = st.checkbox("Provisioned concurrency (keep warm)", value=False)
+
+    # STEP 5 — Environment Variables
+    st.markdown('<div class="step-header"><div class="step-num">5</div><div class="step-title">Environment Variables</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-box">Prefix values with <b>ssm:</b> to resolve from SSM Parameter Store at deploy time — secrets never touch the repo.<br>e.g. <code>DB_PASSWORD</code> → <code>ssm:/app/prod/db-password</code></div>', unsafe_allow_html=True)
+
+    if st.button("＋ Add variable", key="add_env"):
+        st.session_state.env_vars.append({"key": "", "value": ""})
+
+    for i, ev in enumerate(st.session_state.env_vars):
+        c1, c2, c3 = st.columns([2, 3, 0.4])
+        with c1:
+            st.session_state.env_vars[i]["key"] = st.text_input("Key", ev["key"], key=f"ek_{i}")
+        with c2:
+            val = st.text_input("Value", ev["value"], key=f"ev_{i}")
+            st.session_state.env_vars[i]["value"] = val
+            if val.startswith("ssm:"): st.markdown('<span class="badge-amber badge">SSM secret</span>', unsafe_allow_html=True)
+        with c3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✕", key=f"rm_{i}"):
+                st.session_state.env_vars.pop(i)
+                st.rerun()
+
+    s3_bucket = ""
+    if sel.get("s3"):
+        s3_bucket = st.text_input("S3 bucket name (added to IAM policy)", "my-pipeline-bucket")
+
+    # STEP 6 — Lambda Code & Helper Files
+    st.markdown('<div class="step-header"><div class="step-num">6</div><div class="step-title">Lambda Code & Helper Files</div></div>', unsafe_allow_html=True)
+
+    default_handler = '''\
 import json
-import logging
 import os
+import logging
+from datetime import datetime
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
 def handler(event, context):
-    logger.info("Event: %s", json.dumps(event, default=str))
-    try:
-        result = run_pipeline(event)
-        return {"statusCode": 200, "body": json.dumps(result, default=str)}
-    except Exception as exc:
-        logger.exception("Pipeline failed: %s", exc)
-        raise
+    """
+    Entry point. Replace with your actual fetch / transform / write logic.
+    """
+    logger.info("Event: %s", json.dumps(event))
 
+    # ── Your logic here ────────────────────────────────────────────────────
+    result = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "status": "ok",
+    }
 
-def run_pipeline(event: dict) -> dict:
-    # TODO: implement your pipeline logic here
-    #
-    # Useful env vars (set in pipeline config):
-    #   os.environ["DB_HOST"]
-    #   os.environ["RPC_URL"]
-    #
-    records = 0
-    return {"status": "ok", "records": records}
+    logger.info("Done: %s", result)
+    return result
 '''
 
-init_state()
+    handler_code     = st.text_area("handler.py", default_handler, height=260)
+    requirements_txt = st.text_area("requirements.txt", "web3>=6.0.0\npsycopg2-binary>=2.9.9\nboto3>=1.34.0\nrequests>=2.31.0\n", height=110)
 
-# ─── Sidebar ───────────────────────────────────────────────────────────────────
+    st.markdown("#### 📎 Helper Files")
+    st.markdown('<div class="info-box">Upload any additional Python modules, config files, or scripts. These land in <code>lambda/</code> alongside <code>handler.py</code> and are built into the Docker image — import them with <code>from db import get_connection</code>.</div>', unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("""
-    <div style="padding:16px 0 24px">
-        <div style="font-family:Syne,sans-serif;font-size:20px;font-weight:800;
-                    color:#00d4ff;letter-spacing:-0.02em">⚡ Pipeline Builder</div>
-        <div style="font-family:JetBrains Mono,monospace;font-size:11px;
-                    color:#64748b;margin-top:4px">scaffold → commit → deploy</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    current_step = st.session_state.step
-    steps_html = ""
-    for i, label in enumerate(STEPS):
-        # Skip schedule step if no eventbridge
-        if label == "Schedule" and not st.session_state.use_eventbridge:
-            continue
-        # Skip DB step if no RDS
-        if label == "Database" and not st.session_state.use_rds:
-            continue
-        steps_html += step_pill(i + 1, label, active=(i == current_step), done=(i < current_step))
-    st.markdown(steps_html, unsafe_allow_html=True)
-
-    if st.session_state.pipeline_name:
-        st.markdown("---")
-        st.markdown(f"""
-        <div style="font-family:JetBrains Mono,monospace">
-            <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">Current pipeline</div>
-            <div style="font-size:13px;color:#00d4ff;font-weight:600">{st.session_state.pipeline_name}</div>
-            <div style="font-size:11px;color:#64748b;margin-top:4px">{st.session_state.aws_region}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    # Jump navigation
-    for i, label in enumerate(STEPS):
-        if label == "Schedule" and not st.session_state.use_eventbridge:
-            continue
-        if label == "Database" and not st.session_state.use_rds:
-            continue
-        if st.button(label, key=f"nav_{i}", use_container_width=True):
-            st.session_state.step = i
-            st.rerun()
-
-# ─── Nav helpers ───────────────────────────────────────────────────────────────
-
-def next_step():
-    # Skip schedule if no eventbridge
-    nxt = st.session_state.step + 1
-    if nxt < len(STEPS):
-        if STEPS[nxt] == "Schedule" and not st.session_state.use_eventbridge:
-            nxt += 1
-        if STEPS[nxt] == "Database" and not st.session_state.use_rds:
-            nxt += 1
-    st.session_state.step = min(nxt, len(STEPS) - 1)
-
-def prev_step():
-    prv = st.session_state.step - 1
-    if prv >= 0:
-        if STEPS[prv] == "Database" and not st.session_state.use_rds:
-            prv -= 1
-        if STEPS[prv] == "Schedule" and not st.session_state.use_eventbridge:
-            prv -= 1
-    st.session_state.step = max(prv, 0)
-
-def nav_row(show_prev=True, next_label="Continue →", next_disabled=False):
-    cols = st.columns([1, 4, 1])
-    with cols[0]:
-        if show_prev and st.button("← Back"):
-            prev_step(); st.rerun()
-    with cols[2]:
-        if st.button(next_label, type="primary", disabled=next_disabled):
-            next_step(); st.rerun()
-
-# ─── STEP 0: Basics ───────────────────────────────────────────────────────────
-
-def step_basics():
-    section_header("Pipeline basics", "Name and describe your pipeline")
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        name = st.text_input(
-            "Pipeline name",
-            value=st.session_state.pipeline_name,
-            placeholder="arbitrum-block-fetcher",
-            help="Kebab-case, e.g. arbitrum-block-fetcher",
-        )
-        if name:
-            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-            if slug != name:
-                st.info(f"Will be normalised to: `{slug}`")
-            st.session_state.pipeline_name = slug
-
-        desc = st.text_area(
-            "Description",
-            value=st.session_state.pipeline_desc,
-            placeholder="Fetches Arbitrum block numbers at 2am daily and writes to PostgreSQL",
-            height=80,
-        )
-        st.session_state.pipeline_desc = desc
-
-    with col2:
-        region = st.selectbox(
-            "AWS Region",
-            ["us-east-1", "us-east-2", "us-west-2", "eu-west-1", "eu-central-1", "ap-southeast-1"],
-            index=["us-east-1","us-east-2","us-west-2","eu-west-1","eu-central-1","ap-southeast-1"].index(
-                st.session_state.aws_region
-            ),
-        )
-        st.session_state.aws_region = region
-
-        ecr_repo = st.text_input(
-            "ECR repo name",
-            value=st.session_state.get("ecr_repo", "") or (st.session_state.pipeline_name + "-lambda" if st.session_state.pipeline_name else ""),
-            placeholder="my-pipeline-lambda",
-        )
-        st.session_state.ecr_repo = ecr_repo
-
-    nav_row(show_prev=False, next_disabled=not st.session_state.pipeline_name)
-
-# ─── STEP 1: Components ────────────────────────────────────────────────────────
-
-COMPONENT_INFO = {
-    "Lambda": {
-        "icon": "λ",
-        "desc": "The compute layer. Runs your Python script as a containerised function.",
-        "required": True,
-        "color": "#f59e0b",
-    },
-    "EventBridge Scheduler": {
-        "icon": "⏰",
-        "desc": "Triggers your Lambda on a schedule (cron or rate expression).",
-        "required": False,
-        "key": "use_eventbridge",
-        "color": "#00d4ff",
-    },
-    "SNS Failure Alert": {
-        "icon": "🔔",
-        "desc": "Sends a notification when the Lambda errors. Hooks into CloudWatch.",
-        "required": False,
-        "key": "use_sns",
-        "color": "#a78bfa",
-    },
-    "PostgreSQL Target": {
-        "icon": "🗄",
-        "desc": "Generates a migration SQL file + GitHub Actions job to create the target table.",
-        "required": False,
-        "key": "use_rds",
-        "color": "#10b981",
-    },
-}
-
-def step_components():
-    section_header("Select components", "Choose what AWS resources to provision")
-
-    for comp_name, info in COMPONENT_INFO.items():
-        enabled = info.get("required", False) or st.session_state.get(info.get("key", ""), False)
-        col_card, col_check = st.columns([10, 1])
-        with col_card:
-            st.markdown(f"""
-            <div style="background:#10141c;border:1px solid {''+info['color']+'' if enabled else '#1e2a3a'};
-                        border-radius:8px;padding:14px 18px;display:flex;align-items:flex-start;
-                        gap:14px;margin-bottom:8px;transition:border-color 0.15s">
-                <div style="width:36px;height:36px;background:{'rgba('+','.join(str(int(info['color'].lstrip('#')[i:i+2],16)) for i in (0,2,4))+',0.15)'};
-                             border-radius:6px;display:flex;align-items:center;justify-content:center;
-                             font-size:16px;flex-shrink:0">{info['icon']}</div>
-                <div>
-                    <div style="font-family:Syne,sans-serif;font-size:14px;font-weight:700;
-                                color:{'#e2e8f0' if enabled else '#64748b'};margin-bottom:3px">
-                        {comp_name}
-                        {'<span style="font-family:JetBrains Mono,monospace;font-size:10px;background:rgba(245,158,11,0.15);color:#f59e0b;padding:1px 7px;border-radius:3px;margin-left:8px">REQUIRED</span>' if info.get('required') else ''}
-                    </div>
-                    <div style="font-family:JetBrains Mono,monospace;font-size:12px;color:#64748b">{info['desc']}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_check:
-            if not info.get("required"):
-                key = info["key"]
-                val = st.checkbox("", value=st.session_state[key], key=f"comp_{key}", label_visibility="hidden")
-                st.session_state[key] = val
-
-    nav_row()
-
-# ─── STEP 2: Schedule ──────────────────────────────────────────────────────────
-
-def schedule_expression():
-    mode = st.session_state.schedule_mode
-    if mode == "rate":
-        v = st.session_state.rate_value
-        u = st.session_state.rate_unit
-        unit = u.rstrip("s") if v == 1 else u
-        return f"rate({v} {unit})"
-    else:
-        m  = st.session_state.cron_minute
-        h  = st.session_state.cron_hour
-        d  = st.session_state.cron_dom
-        mo = st.session_state.cron_month
-        dw = st.session_state.cron_dow
-        return f"cron({m} {h} {d} {mo} {dw} *)"
-
-def human_schedule():
-    mode = st.session_state.schedule_mode
-    if mode == "rate":
-        v = st.session_state.rate_value
-        u = st.session_state.rate_unit
-        return f"Every {v} {u}"
-    else:
-        h = st.session_state.cron_hour.zfill(2)
-        m = st.session_state.cron_minute.zfill(2)
-        d = st.session_state.cron_dom
-        dw = st.session_state.cron_dow
-        if d == "*" and dw == "?":
-            return f"Daily at {h}:{m} UTC"
-        elif d != "*":
-            return f"Day {d} of each month at {h}:{m} UTC"
-        else:
-            days = {"MON":"Monday","TUE":"Tuesday","WED":"Wednesday","THU":"Thursday",
-                    "FRI":"Friday","SAT":"Saturday","SUN":"Sunday"}
-            return f"Every {days.get(dw, dw)} at {h}:{m} UTC"
-
-def step_schedule():
-    section_header("Schedule", "When should your Lambda run?")
-
-    mode = st.radio(
-        "Schedule mode",
-        ["rate", "cron"],
-        format_func=lambda x: "⚡ Rate (every N minutes/hours/days)" if x == "rate" else "🕐 Cron (specific time)",
-        horizontal=True,
-        index=0 if st.session_state.schedule_mode == "rate" else 1,
+    uploaded_helpers = st.file_uploader(
+        "Upload helper files (e.g. db.py, utils.py, config.json, abi.json, queries.sql)",
+        accept_multiple_files=True,
+        type=["py", "json", "yaml", "yml", "env", "sql", "txt", "sh"],
+        key="helper_files",
     )
-    st.session_state.schedule_mode = mode
-    st.markdown("<br>", unsafe_allow_html=True)
 
-    if mode == "rate":
-        col1, col2 = st.columns(2)
-        with col1:
-            v = st.number_input("Every", min_value=1, max_value=9999,
-                                value=st.session_state.rate_value, key="rate_v_input")
-            st.session_state.rate_value = v
-        with col2:
-            u = st.selectbox("Unit", ["minutes", "hours", "days"],
-                             index=["minutes","hours","days"].index(st.session_state.rate_unit))
-            st.session_state.rate_unit = u
+    if uploaded_helpers:
+        chips_html = "".join([f'<span class="file-chip">📄 lambda/{f.name}</span>' for f in uploaded_helpers])
+        st.markdown(f'<div style="margin:8px 0;">{chips_html}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="success-box">✅ These will be copied into <code>lambda/</code> in the generated repo and built into the Docker image.</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">AWS Cron expression (UTC)</div>', unsafe_allow_html=True)
-        col1, col2, col3, col4, col5 = st.columns(5)
-        labels = ["Minute", "Hour", "Day of month", "Month", "Day of week"]
-        keys   = ["cron_minute","cron_hour","cron_dom","cron_month","cron_dow"]
-        placeholders = ["0","2","*","*","?"]
-        for col, lbl, key, ph in zip([col1,col2,col3,col4,col5], labels, keys, placeholders):
-            with col:
-                val = st.text_input(lbl, value=st.session_state[key], placeholder=ph, key=f"ci_{key}")
-                st.session_state[key] = val
+        st.markdown('<div style="color:#64748b;font-size:12px;font-family:\'JetBrains Mono\',monospace;margin:6px 0;">No helper files added — only handler.py and requirements.txt will be in lambda/</div>', unsafe_allow_html=True)
 
-        st.caption("Use `*` for every, `?` for either day-of-month OR day-of-week (not both). "
-                   "Day-of-week: MON-SUN. AWS EventBridge adds an implicit `year` field.")
+    # STEP 7 — RDS / Postgres
+    db_schema = db_table = ""
+    create_migration = False
 
-    expr = schedule_expression()
-    human = human_schedule()
+    if sel.get("rds"):
+        st.markdown('<div class="step-header"><div class="step-num">7</div><div class="step-title">Postgres / RDS — Target Table</div></div>', unsafe_allow_html=True)
+        create_migration = True
+
+        c1, c2 = st.columns(2)
+        with c1: db_schema = st.text_input("Schema", "public")
+        with c2: db_table  = st.text_input("Table name", slug.replace("-", "_"))
+
+        st.markdown("**Table columns**")
+        if st.button("＋ Add column", key="add_col"):
+            st.session_state.db_columns.append({"name": "", "type": "TEXT", "pk": False, "nullable": True, "default": ""})
+
+        pg_types = ["TEXT", "INTEGER", "BIGINT", "BIGSERIAL", "NUMERIC", "BOOLEAN", "TIMESTAMPTZ", "TIMESTAMP", "JSONB", "UUID", "VARCHAR(255)"]
+
+        for i, col in enumerate(st.session_state.db_columns):
+            c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 0.7, 0.7, 2, 0.4])
+            with c1: st.session_state.db_columns[i]["name"]     = st.text_input("Column",  col["name"],    key=f"cn_{i}")
+            with c2: st.session_state.db_columns[i]["type"]     = st.selectbox("Type", pg_types, index=pg_types.index(col["type"]) if col["type"] in pg_types else 0, key=f"ct_{i}")
+            with c3: st.session_state.db_columns[i]["pk"]       = st.checkbox("PK",   col["pk"],       key=f"cpk_{i}")
+            with c4: st.session_state.db_columns[i]["nullable"] = st.checkbox("NULL", col["nullable"],  key=f"cnull_{i}")
+            with c5: st.session_state.db_columns[i]["default"]  = st.text_input("Default", col["default"], key=f"cdef_{i}")
+            with c6:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("✕", key=f"rmc_{i}"):
+                    st.session_state.db_columns.pop(i)
+                    st.rerun()
+
+        cols_sql, pk_cols = [], []
+        for col in st.session_state.db_columns:
+            if not col["name"]: continue
+            parts = [f'    "{col["name"]}"', col["type"]]
+            if col["pk"]: pk_cols.append(f'"{col["name"]}"')
+            if not col["nullable"] and not col["pk"]: parts.append("NOT NULL")
+            if col["default"]: parts.append(f"DEFAULT {col['default']}")
+            cols_sql.append(" ".join(parts))
+        if pk_cols: cols_sql.append(f"    PRIMARY KEY ({', '.join(pk_cols)})")
+        preview_sql = f'CREATE TABLE IF NOT EXISTS "{db_schema}"."{db_table}" (\n' + ",\n".join(cols_sql) + "\n);"
+        st.code(preview_sql, language="sql")
+
+    # STEP Generate
+    gen_step = 8 if sel.get("rds") else 7
+    st.markdown(f'<div class="step-header"><div class="step-num">{gen_step}</div><div class="step-title">Generate Repo</div></div>', unsafe_allow_html=True)
+
+    config = {
+        "slug":                       slug,
+        "pipeline_name":              pipeline_name,
+        "aws_region":                 aws_region,
+        "aws_account_id":             aws_account_id,
+        "ecr_repo_name":              ecr_repo_name,
+        "stage":                      prod_stage,
+        "selected":                   sel,
+        "trigger_type":               trigger_type,
+        "schedule_expr":              schedule_expr,
+        "sns_topic_arn":              sns_topic_arn,
+        "sns_publisher_base":         sns_publisher_base,
+        "sns_publisher_suffix_staging": sns_publisher_suffix_staging,
+        "sns_publisher_suffix_prod":  sns_publisher_suffix_prod,
+        "sqs_arn":                    sqs_arn,
+        "sqs_batch_size":             sqs_batch_size,
+        "http_path":                  http_path,
+        "http_method":                http_method,
+        "memory":                     memory,
+        "timeout":                    timeout,
+        "architecture":               architecture,
+        "python_runtime":             python_runtime,
+        "reserved_concurrency":       reserved_concurrency,
+        "keep_warm":                  keep_warm,
+        "env_vars":                   st.session_state.env_vars,
+        "s3_bucket":                  s3_bucket,
+        "handler_code":               handler_code,
+        "requirements_txt":           requirements_txt,
+        "create_migration":           create_migration,
+        "db_schema":                  db_schema,
+        "db_table":                   db_table,
+        "db_columns":                 st.session_state.db_columns,
+    }
+
+    helper_lines = "".join([f'│&nbsp;&nbsp;&nbsp;├── <span class="key">{f.name}</span> &nbsp;<span class="muted">← helper</span><br>' for f in (uploaded_helpers or [])])
+    migration_line = f'├── migrations/<br>│&nbsp;&nbsp;&nbsp;└── <span class="key">V001__create_{db_table or "table"}.sql</span><br>' if create_migration else ""
+
     st.markdown(f"""
-    <div style="margin-top:20px;background:#0a0c10;border:1px solid #00d4ff;
-                border-radius:8px;padding:16px 20px;display:flex;align-items:center;gap:20px">
-        <div>
-            <div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#64748b;
-                        text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">Expression</div>
-            <div style="font-family:JetBrains Mono,monospace;font-size:16px;color:#00d4ff;
-                        font-weight:600">{expr}</div>
-        </div>
-        <div style="width:1px;background:#1e2a3a;height:36px"></div>
-        <div>
-            <div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#64748b;
-                        text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">Runs</div>
-            <div style="font-family:Syne,sans-serif;font-size:15px;color:#e2e8f0;
-                        font-weight:600">{human}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    nav_row()
-
-# ─── STEP 3: Lambda config ─────────────────────────────────────────────────────
-
-def step_lambda_config():
-    section_header("Lambda configuration", "Memory, timeout, runtime, and environment variables")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        runtime = st.selectbox(
-            "Runtime",
-            ["python3.12", "python3.11", "python3.10"],
-            index=["python3.12","python3.11","python3.10"].index(st.session_state.runtime),
-        )
-        st.session_state.runtime = runtime
-
-        arch = st.selectbox(
-            "Architecture",
-            ["x86_64", "arm64"],
-            index=["x86_64","arm64"].index(st.session_state.arch),
-            help="arm64 (Graviton) is cheaper. Use x86_64 if unsure.",
-        )
-        st.session_state.arch = arch
-
-    with col2:
-        mem = st.select_slider(
-            "Memory (MB)",
-            options=[128, 256, 512, 1024, 2048, 4096],
-            value=st.session_state.memory_mb,
-        )
-        st.session_state.memory_mb = mem
-
-        timeout = st.slider(
-            "Timeout (seconds)",
-            min_value=10, max_value=900,
-            value=st.session_state.timeout_sec,
-            step=10,
-        )
-        st.session_state.timeout_sec = timeout
-
-    st.markdown("---")
-    st.markdown('<div style="font-family:Syne,sans-serif;font-size:16px;font-weight:700;color:#e2e8f0;margin-bottom:12px">Environment variables</div>', unsafe_allow_html=True)
-    st.caption("Prefix the value with `ssm:` for secrets stored in AWS SSM Parameter Store — e.g. `ssm:/myapp/db-password`")
-
-    # Add/remove env vars
-    env_vars = st.session_state.env_vars
-
-    to_delete = None
-    for i, ev in enumerate(env_vars):
-        col_k, col_v, col_s, col_d = st.columns([2, 3, 1, 0.5])
-        with col_k:
-            ev["key"] = st.text_input("Key", value=ev["key"], key=f"ev_k_{i}", label_visibility="collapsed", placeholder="KEY_NAME")
-        with col_v:
-            ev["value"] = st.text_input("Value", value=ev["value"], key=f"ev_v_{i}", label_visibility="collapsed", placeholder="value or ssm:/path/to/secret")
-        with col_s:
-            is_ssm = ev["value"].startswith("ssm:") if ev["value"] else False
-            if is_ssm:
-                st.markdown(f'<div style="padding-top:8px">{badge("SSM","#a78bfa")}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div style="padding-top:8px">{badge("PLAIN","#64748b")}</div>', unsafe_allow_html=True)
-        with col_d:
-            if st.button("✕", key=f"del_ev_{i}"):
-                to_delete = i
-
-    if to_delete is not None:
-        env_vars.pop(to_delete)
-        st.rerun()
-
-    if st.button("+ Add variable"):
-        env_vars.append({"key": "", "value": ""})
-        st.rerun()
-
-    nav_row()
-
-# ─── STEP 4: Lambda code ───────────────────────────────────────────────────────
-
-def step_lambda_code():
-    section_header("Lambda code", "Paste your handler and upload any helper scripts")
-
-    tab1, tab2, tab3 = st.tabs(["  handler.py  ", "  requirements.txt  ", "  helper scripts  "])
-
-    with tab1:
-        code = st.text_area(
-            "Handler code",
-            value=st.session_state.handler_code,
-            height=400,
-            help="Must contain a function named `handler(event, context)`",
-            label_visibility="collapsed",
-        )
-        st.session_state.handler_code = code
-        if "def handler" not in code:
-            st.warning("⚠ handler.py must define a `handler(event, context)` function — this is the Lambda entry point.")
-
-    with tab2:
-        reqs = st.text_area(
-            "requirements",
-            value=st.session_state.requirements,
-            height=200,
-            label_visibility="collapsed",
-            placeholder="psycopg2-binary==2.9.9\nrequests==2.31.0\n",
-        )
-        st.session_state.requirements = reqs
-
-    with tab3:
-        st.caption("Upload any Python helper modules that handler.py imports (e.g. `utils.py`, `db.py`).")
-        uploaded = st.file_uploader(
-            "Upload helper scripts",
-            type=["py", "json", "yaml", "yml", "sql", "txt"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-        for f in uploaded:
-            content = f.read().decode("utf-8", errors="replace")
-            st.session_state.helper_files[f.name] = content
-
-        if st.session_state.helper_files:
-            st.markdown(f'<div style="margin-top:8px">{badge(str(len(st.session_state.helper_files)) + " file(s) loaded","#10b981")}</div>', unsafe_allow_html=True)
-            for fname in st.session_state.helper_files:
-                col_f, col_x = st.columns([8, 1])
-                with col_f:
-                    st.markdown(f'<code style="font-size:12px">{fname}</code>', unsafe_allow_html=True)
-                with col_x:
-                    if st.button("✕", key=f"del_helper_{fname}"):
-                        del st.session_state.helper_files[fname]
-                        st.rerun()
-
-    nav_row()
-
-# ─── STEP 5: Database ──────────────────────────────────────────────────────────
-
-PG_TYPES = ["TEXT","VARCHAR(255)","INTEGER","BIGINT","NUMERIC","BOOLEAN",
-            "TIMESTAMP","TIMESTAMPTZ","DATE","JSONB","UUID","SERIAL","BIGSERIAL"]
-
-def step_database():
-    section_header("Target table schema", "Define the PostgreSQL table the pipeline will write to")
-
-    col1, col2 = st.columns([2, 3])
-    with col1:
-        tbl = st.text_input(
-            "Table name",
-            value=st.session_state.db_table,
-            placeholder="block_timestamps",
-        )
-        st.session_state.db_table = tbl.lower().replace(" ", "_") if tbl else tbl
-
-    schema = st.session_state.db_schema
-
-    st.markdown('<div style="font-family:Syne,sans-serif;font-size:15px;font-weight:700;color:#e2e8f0;margin:16px 0 8px">Columns</div>', unsafe_allow_html=True)
-
-    # Column header
-    hcols = st.columns([3, 2, 0.8, 0.8, 2, 0.5])
-    for h, w in zip(["Column name","Type","PK","Nullable","Default",""], hcols):
-        if h:
-            w.markdown(f'<div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;padding-bottom:4px">{h}</div>', unsafe_allow_html=True)
-
-    to_del = None
-    for i, col in enumerate(schema):
-        c1,c2,c3,c4,c5,c6 = st.columns([3, 2, 0.8, 0.8, 2, 0.5])
-        with c1:
-            col["col"] = st.text_input("col", value=col["col"], key=f"sc_col_{i}", label_visibility="collapsed", placeholder="column_name")
-        with c2:
-            col["type"] = st.selectbox("type", PG_TYPES, index=PG_TYPES.index(col.get("type","TEXT")), key=f"sc_type_{i}", label_visibility="collapsed")
-        with c3:
-            col["pk"] = st.checkbox("", value=col.get("pk", False), key=f"sc_pk_{i}")
-        with c4:
-            col["nullable"] = st.checkbox("", value=col.get("nullable", True), key=f"sc_null_{i}")
-        with c5:
-            col["default"] = st.text_input("def", value=col.get("default",""), key=f"sc_def_{i}", label_visibility="collapsed", placeholder="NULL")
-        with c6:
-            if st.button("✕", key=f"del_col_{i}"):
-                to_del = i
-
-    if to_del is not None:
-        schema.pop(to_del)
-        st.rerun()
-
-    if st.button("+ Add column"):
-        schema.append({"col":"","type":"TEXT","pk":False,"nullable":True,"default":""})
-        st.rerun()
-
-    if tbl and schema:
-        st.markdown("---")
-        st.markdown('<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">SQL preview</div>', unsafe_allow_html=True)
-        sql = generate_migration_sql(tbl, schema, preview=True)
-        st.code(sql, language="sql")
-
-    nav_row(next_label="Generate repo →")
-
-# ─── FILE GENERATORS ──────────────────────────────────────────────────────────
-
-def generate_migration_sql(table: str, schema: list, preview=False) -> str:
-    if not table or not schema:
-        return "-- No table defined"
-    cols = []
-    pk_cols = [c["col"] for c in schema if c.get("pk")]
-    for c in schema:
-        if not c["col"]:
-            continue
-        parts = [f'    "{c["col"]}" {c["type"]}']
-        if not c.get("nullable", True):
-            parts.append("NOT NULL")
-        if c.get("default",""):
-            parts.append(f"DEFAULT {c['default']}")
-        cols.append(" ".join(parts))
-    if pk_cols:
-        cols.append(f'    PRIMARY KEY ({", ".join(pk_cols)})')
-    col_sql = ",\n".join(cols)
-    return f"""-- Migration: create {table}
--- Generated by Pipeline Builder on {datetime.utcnow().strftime('%Y-%m-%d')}
-
-CREATE TABLE IF NOT EXISTS {table} (
-{col_sql}
-);
-"""
-
-def generate_dockerfile(runtime: str, arch: str) -> str:
-    py = runtime.replace("python", "")
-    platform = "linux/arm64" if arch == "arm64" else "linux/amd64"
-    return f"""FROM --platform={platform} public.ecr.aws/lambda/python:{py}
-
-# Install dependencies
-COPY requirements.txt .
-RUN pip install -r requirements.txt --no-cache-dir
-
-# Copy all source files
-COPY . ${{LAMBDA_TASK_ROOT}}
-
-CMD ["handler.handler"]
-"""
-
-def generate_build_sh(name: str, region: str, ecr_repo: str, arch: str) -> str:
-    platform = "linux/arm64" if arch == "arm64" else "linux/amd64"
-    return f"""#!/usr/bin/env bash
-# build.sh — Build the Lambda container image and push to ECR
-# Usage: ./build.sh [image-tag]
-set -euo pipefail
-
-PIPELINE_NAME="{name}"
-ECR_REPO="{ecr_repo}"
-AWS_REGION="{region}"
-AWS_ACCOUNT_ID="${{AWS_ACCOUNT_ID:?AWS_ACCOUNT_ID env var not set}}"
-IMAGE_TAG="${{1:-$(git rev-parse --short HEAD)}}"
-
-ECR_URI="${{AWS_ACCOUNT_ID}}.dkr.ecr.${{AWS_REGION}}.amazonaws.com/${{ECR_REPO}}"
-
-echo "Building ${{ECR_URI}}:${{IMAGE_TAG}} ..."
-
-# Authenticate with ECR
-aws ecr get-login-password --region "${{AWS_REGION}}" \\
-  | docker login --username AWS --password-stdin \\
-    "${{AWS_ACCOUNT_ID}}.dkr.ecr.${{AWS_REGION}}.amazonaws.com"
-
-# Create ECR repo if it doesn't exist
-aws ecr describe-repositories --repository-names "${{ECR_REPO}}" \\
-    --region "${{AWS_REGION}}" > /dev/null 2>&1 \\
-  || aws ecr create-repository \\
-       --repository-name "${{ECR_REPO}}" \\
-       --region "${{AWS_REGION}}" \\
-       --image-scanning-configuration scanOnPush=true
-
-# Build & push
-docker buildx build \\
-  --platform {platform} \\
-  --tag "${{ECR_URI}}:${{IMAGE_TAG}}" \\
-  --tag "${{ECR_URI}}:latest" \\
-  --push \\
-  .
-
-echo "✓ Pushed ${{ECR_URI}}:${{IMAGE_TAG}}"
-"""
-
-def generate_cfn_template(name: str, region: str, ecr_repo: str, arch: str,
-                           memory: int, timeout: int, env_vars: list,
-                           schedule_expr: str, use_eventbridge: bool,
-                           use_sns: bool) -> str:
-    # Build env vars — ssm: prefix uses dynamic references, with per-env SSM path support.
-    # If a value contains {env}, it becomes a !Sub reference to the Environment parameter.
-    env_lines = ""
-    for ev in env_vars:
-        k, v = ev.get("key", ""), ev.get("value", "")
-        if not k:
-            continue
-        if v and v.startswith("ssm:"):
-            path = v[4:]
-            env_lines += f"        {k}: '{{{{resolve:ssm:{path}}}}}'\n"
-        else:
-            env_lines += f"        {k}: '{v}'\n"
-    # Always inject ENVIRONMENT so the Lambda knows which env it's running in
-    env_lines += "        ENVIRONMENT: !Ref Environment\n"
-    env_block = f"      Variables:\n{env_lines}"
-
-    sns_resources = ""
-    sns_outputs = ""
-    if use_sns:
-        sns_resources = f"""
-  FailureAlertTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub "{name}-${{Environment}}-failures"
-      DisplayName: !Sub "{name} ${{Environment}} failures"
-
-  LambdaErrorAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "{name}-${{Environment}}-errors"
-      AlarmDescription: !Sub "Lambda errors in {name} (${{Environment}})"
-      Namespace: AWS/Lambda
-      MetricName: Errors
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref PipelineFunction
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 1
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref FailureAlertTopic
-"""
-        sns_outputs = f"""
-  FailureTopicArn:
-    Description: Subscribe to this SNS topic to receive failure alerts
-    Value: !Ref FailureAlertTopic
-"""
-
-    eventbridge_resources = ""
-    if use_eventbridge:
-        eventbridge_resources = f"""
-  SchedulerRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "{name}-${{Environment}}-scheduler-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: scheduler.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: InvokeLambda
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !GetAtt PipelineFunction.Arn
-
-  PipelineSchedule:
-    Type: AWS::Scheduler::Schedule
-    Properties:
-      Name: !Sub "{name}-${{Environment}}-schedule"
-      ScheduleExpression: "{schedule_expr}"
-      ScheduleExpressionTimezone: UTC
-      FlexibleTimeWindow:
-        Mode: "OFF"
-      Target:
-        Arn: !GetAtt PipelineFunction.Arn
-        RoleArn: !GetAtt SchedulerRole.Arn
-"""
-
-    return f"""# CloudFormation template: {name}
-# Generated by Pipeline Builder
-#
-# Deploys to staging:
-#   aws cloudformation deploy --template-file infra/template.yaml \\
-#     --stack-name {name}-staging --capabilities CAPABILITY_NAMED_IAM \\
-#     --parameter-overrides ImageTag=<tag> Environment=staging
-#
-# Deploys to prod:
-#   aws cloudformation deploy --template-file infra/template.yaml \\
-#     --stack-name {name}-prod --capabilities CAPABILITY_NAMED_IAM \\
-#     --parameter-overrides ImageTag=<tag> Environment=prod
-
-AWSTemplateFormatVersion: "2010-09-09"
-Description: !Sub "{name} (${{Environment}}) — generated by Pipeline Builder"
-
-Parameters:
-
-  ImageTag:
-    Type: String
-    Default: latest
-    Description: ECR image tag to deploy
-
-  Environment:
-    Type: String
-    Default: staging
-    AllowedValues: [staging, prod]
-    Description: Deployment environment
-
-Resources:
-
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "{name}-${{Environment}}-lambda-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
-  PipelineFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub "{name}-${{Environment}}"
-      Description: !Sub "{name} ${{Environment}} — image ${{ImageTag}}"
-      PackageType: Image
-      Code:
-        ImageUri: !Sub "${{AWS::AccountId}}.dkr.ecr.{region}.amazonaws.com/{ecr_repo}:${{ImageTag}}"
-      Architectures:
-        - {arch}
-      Role: !GetAtt LambdaExecutionRole.Arn
-      MemorySize: {memory}
-      Timeout: {timeout}
-      Environment:
-{env_block}
-{eventbridge_resources}{sns_resources}
-Outputs:
-
-  FunctionName:
-    Description: Lambda function name
-    Value: !Ref PipelineFunction
-
-  FunctionArn:
-    Description: Lambda function ARN
-    Value: !GetAtt PipelineFunction.Arn
-
-  Environment:
-    Description: Deployed environment
-    Value: !Ref Environment
-{sns_outputs}"""
-
-def generate_workflow_ecr(name: str, region: str, ecr_repo: str) -> str:
-    return f"""name: 1 — Build & push ECR image
-
-on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Image tag (default: git SHA)'
-        required: false
-        default: ''
-  push:
-    branches: [main]
-    paths:
-      - 'lambda/**'
-      - 'Dockerfile'
-      - 'requirements.txt'
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  AWS_REGION: {region}
-  ECR_REPO: {ecr_repo}
-
-jobs:
-  build-and-push:
-    name: Build & push to ECR
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: ${{{{ env.AWS_REGION }}}}
-
-      - name: Set image tag
-        id: tag
-        run: |
-          TAG="${{{{ inputs.image_tag }}}}"
-          if [ -z "$TAG" ]; then TAG=$(git rev-parse --short HEAD); fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Image tag: $TAG"
-
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Create ECR repo (if not exists)
-        run: |
-          aws ecr describe-repositories --repository-names ${{{{ env.ECR_REPO }}}} \\
-          || aws ecr create-repository --repository-name ${{{{ env.ECR_REPO }}}} \\
-               --image-scanning-configuration scanOnPush=true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{{{ steps.login-ecr.outputs.registry }}}}/${{{{ env.ECR_REPO }}}}:${{{{ steps.tag.outputs.tag }}}}
-            ${{{{ steps.login-ecr.outputs.registry }}}}/${{{{ env.ECR_REPO }}}}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Output image URI
-        run: |
-          echo "✓ Pushed: ${{{{ steps.login-ecr.outputs.registry }}}}/${{{{ env.ECR_REPO }}}}:${{{{ steps.tag.outputs.tag }}}}"
-          echo "image_uri=${{{{ steps.login-ecr.outputs.registry }}}}/${{{{ env.ECR_REPO }}}}:${{{{ steps.tag.outputs.tag }}}}" >> "$GITHUB_OUTPUT"
-"""
-
-def generate_workflow_lambda(name: str, region: str, ecr_repo: str) -> str:
-    return f"""name: 2 — Deploy Lambda (staging → prod)
-
-on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'ECR image tag to deploy (from workflow 1 output)'
-        required: true
-        default: 'latest'
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  AWS_REGION: {region}
-
-jobs:
-
-  # ── Stage 1: deploy to staging ──────────────────────────────────────────────
-  deploy-staging:
-    name: Deploy → staging
-    runs-on: ubuntu-latest
-    environment: staging          # maps to GitHub Environment "staging"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: ${{{{ env.AWS_REGION }}}}
-
-      - name: Deploy staging stack
-        run: |
-          aws cloudformation deploy \\
-            --template-file infra/template.yaml \\
-            --stack-name {name}-staging \\
-            --capabilities CAPABILITY_NAMED_IAM \\
-            --parameter-overrides ImageTag=${{{{ inputs.image_tag }}}} Environment=staging \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            --no-fail-on-empty-changeset
-
-      - name: Print staging outputs
-        run: |
-          aws cloudformation describe-stacks \\
-            --stack-name {name}-staging \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            --query "Stacks[0].Outputs" \\
-            --output table
-
-      - name: Smoke test staging
-        run: |
-          RESULT=$(aws lambda invoke \\
-            --function-name {name}-staging \\
-            --payload '{{}}' \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            --log-type Tail \\
-            /tmp/response.json \\
-            --query 'FunctionError' \\
-            --output text)
-          cat /tmp/response.json
-          if [ "$RESULT" != "None" ]; then
-            echo "✗ Smoke test failed — aborting before prod"
-            exit 1
-          fi
-          echo "✓ Staging smoke test passed"
-
-  # ── Stage 2: manual approval gate ──────────────────────────────────────────
-  # GitHub will pause here and send a review request to whoever you configure
-  # in the "production" GitHub Environment (repo Settings → Environments).
-  # The prod job only runs once someone clicks "Approve".
-
-  deploy-prod:
-    name: Deploy → prod
-    runs-on: ubuntu-latest
-    needs: deploy-staging         # only runs if staging succeeded
-    environment: production       # triggers the approval gate
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: ${{{{ env.AWS_REGION }}}}
-
-      - name: Deploy prod stack
-        run: |
-          aws cloudformation deploy \\
-            --template-file infra/template.yaml \\
-            --stack-name {name}-prod \\
-            --capabilities CAPABILITY_NAMED_IAM \\
-            --parameter-overrides ImageTag=${{{{ inputs.image_tag }}}} Environment=prod \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            --no-fail-on-empty-changeset
-
-      - name: Print prod outputs
-        run: |
-          aws cloudformation describe-stacks \\
-            --stack-name {name}-prod \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            --query "Stacks[0].Outputs" \\
-            --output table
-
-      - name: Smoke test prod
-        run: |
-          aws lambda invoke \\
-            --function-name {name}-prod \\
-            --payload '{{}}' \\
-            --region ${{{{ env.AWS_REGION }}}} \\
-            /tmp/response.json
-          cat /tmp/response.json
-          echo "✓ Prod deployment complete"
-
-# ─── GitHub Environments setup (one-time, in repo settings) ──────────────────
-#
-# 1. Go to: repo → Settings → Environments → New environment
-# 2. Create "staging"    — no approval required (deploys automatically)
-# 3. Create "production" — add Required Reviewers (your team leads)
-#
-# When workflow 2 runs:
-#   staging deploys immediately → smoke test runs →
-#   GitHub sends approval request to reviewers →
-#   reviewer clicks Approve in the Actions UI →
-#   prod deploys
-"""
-
-def generate_workflow_migration(name: str, region: str, table: str) -> str:
-    return f"""name: 3 — Apply DB migration
-
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Target environment'
-        required: true
-        type: choice
-        options: [staging, prod]
-        default: staging
-      migration_file:
-        description: 'Migration file to run (e.g. V001__create_{table}.sql)'
-        required: true
-        default: 'V001__create_{table}.sql'
-      confirm:
-        description: 'Type the environment name again to confirm (staging or prod)'
-        required: true
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  AWS_REGION: {region}
-
-jobs:
-  apply-migration:
-    name: Apply migration → ${{{{ inputs.environment }}}}
-    runs-on: ubuntu-latest
-    # Double-confirms: input must match the selected environment
-    if: inputs.confirm == inputs.environment
-    environment: ${{{{ inputs.environment }}}}   # triggers approval gate for prod
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate migration file exists
-        run: |
-          if [ ! -f "migrations/${{{{ inputs.migration_file }}}}" ]; then
-            echo "✗ File not found: migrations/${{{{ inputs.migration_file }}}}"
-            exit 1
-          fi
-          echo "✓ Found: migrations/${{{{ inputs.migration_file }}}}"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{{{ secrets.AWS_DEPLOY_ROLE_ARN }}}}
-          aws-region: ${{{{ env.AWS_REGION }}}}
-
-      - name: Fetch DB credentials from SSM
-        id: db
-        run: |
-          ENV="${{{{ inputs.environment }}}}"
-          DB_HOST=$(aws ssm get-parameter --name "/pipeline-factory/${{ENV}}/db-host" --query Parameter.Value --output text)
-          DB_NAME=$(aws ssm get-parameter --name "/pipeline-factory/${{ENV}}/db-name" --query Parameter.Value --output text)
-          DB_USER=$(aws ssm get-parameter --name "/pipeline-factory/${{ENV}}/db-user" --query Parameter.Value --output text)
-          DB_PASS=$(aws ssm get-parameter --name "/pipeline-factory/${{ENV}}/db-password" --with-decryption --query Parameter.Value --output text)
-          echo "::add-mask::$DB_PASS"
-          echo "host=$DB_HOST" >> "$GITHUB_OUTPUT"
-          echo "name=$DB_NAME" >> "$GITHUB_OUTPUT"
-          echo "user=$DB_USER" >> "$GITHUB_OUTPUT"
-          echo "pass=$DB_PASS" >> "$GITHUB_OUTPUT"
-
-      - name: Apply migration
-        env:
-          PGHOST: ${{{{ steps.db.outputs.host }}}}
-          PGDATABASE: ${{{{ steps.db.outputs.name }}}}
-          PGUSER: ${{{{ steps.db.outputs.user }}}}
-          PGPASSWORD: ${{{{ steps.db.outputs.pass }}}}
-          PGSSLMODE: require
-        run: |
-          echo "Applying migrations/${{{{ inputs.migration_file }}}} → ${{{{ inputs.environment }}}}"
-          psql -f "migrations/${{{{ inputs.migration_file }}}}"
-          echo "✓ Migration applied to ${{{{ inputs.environment }}}}"
-
-# ─── SSM parameter paths (per environment) ───────────────────────────────────
-#
-# Staging:
-#   /pipeline-factory/staging/db-host
-#   /pipeline-factory/staging/db-name
-#   /pipeline-factory/staging/db-user
-#   /pipeline-factory/staging/db-password  (SecureString)
-#
-# Prod:
-#   /pipeline-factory/prod/db-host
-#   /pipeline-factory/prod/db-name
-#   /pipeline-factory/prod/db-user
-#   /pipeline-factory/prod/db-password     (SecureString)
-#
-# Set them via CLI:
-#   aws ssm put-parameter --name "/pipeline-factory/staging/db-host" --value "..." --type String
-#   aws ssm put-parameter --name "/pipeline-factory/prod/db-password" --value "..." --type SecureString
-"""
-
-def generate_readme(name: str, desc: str, schedule_expr: str, region: str,
-                    ecr_repo: str, use_rds: bool, table: str) -> str:
-    migration_section = ""
-    if use_rds and table:
-        migration_section = f"""
-## Database migration
-
-Run **3 — Apply DB migration** workflow (type `{table}` to confirm).
-
-This creates the `{table}` table in your PostgreSQL database.
-"""
-    return f"""# {name}
-
-{desc}
-
-> Generated by [Pipeline Builder](https://github.com/your-org/pipeline-builder) on {datetime.utcnow().strftime('%Y-%m-%d')}
-
----
-
-## Deploy sequence
-
-Run the GitHub Actions workflows in order:
-
-| Step | Workflow | When |
-|------|----------|------|
-| 1 | **Build & push ECR image** | Every code change |
-| 2 | **Deploy Lambda** | After step 1 |
-| 3 | **Apply DB migration** | First deploy only |
-
----
-
-## Local development
-
-```bash
-# Build image locally
-./build.sh
-
-# Invoke the handler directly (no AWS)
-python -c "from lambda.handler import run_pipeline; print(run_pipeline({{}}))"
-
-# Run in Docker (mimics Lambda environment)
-docker build -t {name} .
-docker run --rm \\
-  -e AWS_REGION={region} \\
-  -e DB_HOST=localhost \\
-  {name} \\
-  aws lambda invoke --function-name {name} --payload '{{}}' /tmp/out.json
-```
-
-## Schedule
-`{schedule_expr}` (UTC)
-
-## Resources
-
-| Resource | Name |
-|----------|------|
-| Lambda | `{name}` |
-| ECR repo | `{ecr_repo}` |
-| Region | `{region}` |
-{migration_section}
-## Required GitHub secrets
-
-| Secret | Description |
-|--------|-------------|
-| `AWS_ACCOUNT_ID` | Your 12-digit AWS account ID |
-| `AWS_DEPLOY_ROLE_ARN` | IAM role for OIDC deploy (see docs) |
-"""
-
-# ─── STEP 6: Generate ──────────────────────────────────────────────────────────
-
-def build_zip() -> bytes:
-    s = st.session_state
-    name = s.pipeline_name
-    ecr_repo = s.get("ecr_repo") or f"{name}-lambda"
-    schedule_expr = schedule_expression() if s.use_eventbridge else "manual"
-    table = s.db_table
-    schema = s.db_schema
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        root = f"{name}/"
-
-        # Lambda source
-        zf.writestr(root + "lambda/handler.py", s.handler_code)
-        zf.writestr(root + "lambda/requirements.txt", s.requirements)
-        for fname, content in s.helper_files.items():
-            zf.writestr(root + f"lambda/{fname}", content)
-
-        # Dockerfile + build.sh (at repo root — Docker context is whole repo)
-        zf.writestr(root + "Dockerfile", generate_dockerfile(s.runtime, s.arch))
-        zf.writestr(root + "requirements.txt", s.requirements)  # also at root for Docker
-        build_sh = generate_build_sh(name, s.aws_region, ecr_repo, s.arch)
-        zf.writestr(root + "build.sh", build_sh)
-
-        # CloudFormation
-        cfn = generate_cfn_template(
-            name, s.aws_region, ecr_repo, s.arch,
-            s.memory_mb, s.timeout_sec, s.env_vars,
-            schedule_expr, s.use_eventbridge, s.use_sns,
-        )
-        zf.writestr(root + "infra/template.yaml", cfn)
-
-        # GitHub Actions
-        zf.writestr(root + ".github/workflows/1-deploy-ecr.yml", generate_workflow_ecr(name, s.aws_region, ecr_repo))
-        zf.writestr(root + ".github/workflows/2-deploy-lambda.yml", generate_workflow_lambda(name, s.aws_region, ecr_repo))
-
-        # Migration
-        if s.use_rds and table and schema:
-            sql = generate_migration_sql(table, schema)
-            zf.writestr(root + f"migrations/V001__create_{table}.sql", sql)
-            zf.writestr(root + ".github/workflows/3-apply-migration.yml",
-                        generate_workflow_migration(name, s.aws_region, table))
-
-        # Metadata
-        config = {
-            "name": name,
-            "description": s.pipeline_desc,
-            "aws_region": s.aws_region,
-            "ecr_repo": ecr_repo,
-            "runtime": s.runtime,
-            "arch": s.arch,
-            "memory_mb": s.memory_mb,
-            "timeout_sec": s.timeout_sec,
-            "schedule": schedule_expr,
-            "components": {
-                "eventbridge": s.use_eventbridge,
-                "sns": s.use_sns,
-                "rds": s.use_rds,
-            },
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-        }
-        zf.writestr(root + "pipeline.json", json.dumps(config, indent=2))
-        zf.writestr(root + "README.md", generate_readme(
-            name, s.pipeline_desc, schedule_expr, s.aws_region,
-            ecr_repo, s.use_rds, table,
-        ))
-
-    return buf.getvalue()
-
-def step_generate():
-    s = st.session_state
-    name = s.pipeline_name
-    ecr_repo = s.get("ecr_repo") or f"{name}-lambda"
-    schedule_expr = schedule_expression() if s.use_eventbridge else "manual"
-    table = s.db_table
-
-    section_header("Generate repo", "Review and download your pipeline")
-
-    # Summary cards
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Pipeline", name)
-    with col2:
-        st.metric("Runtime", s.runtime)
-    with col3:
-        st.metric("Memory", f"{s.memory_mb} MB")
-    with col4:
-        st.metric("Schedule", schedule_expr if s.use_eventbridge else "Manual")
-
-    st.markdown("---")
-
-    # File tree
-    st.markdown('<div style="font-family:Syne,sans-serif;font-size:16px;font-weight:700;color:#e2e8f0;margin-bottom:12px">Repo structure</div>', unsafe_allow_html=True)
-
-    files = [
-        (f"{name}/lambda/handler.py", "Your Lambda handler"),
-        (f"{name}/lambda/requirements.txt", "Python dependencies"),
-        (f"{name}/Dockerfile", "Lambda container image"),
-        (f"{name}/build.sh", "Build & push to ECR"),
-        (f"{name}/infra/template.yaml", "CloudFormation: Lambda + EventBridge + SNS"),
-        (f"{name}/.github/workflows/1-deploy-ecr.yml", "CI: build & push image"),
-        (f"{name}/.github/workflows/2-deploy-lambda.yml", "CI: update Lambda"),
-        (f"{name}/pipeline.json", "Pipeline metadata"),
-        (f"{name}/README.md", "Documentation"),
-    ]
-    if s.helper_files:
-        for fn in s.helper_files:
-            files.insert(2, (f"{name}/lambda/{fn}", "Helper script"))
-    if s.use_rds and table:
-        files.insert(-2, (f"{name}/migrations/V001__create_{table}.sql", "DB migration"))
-        files.insert(-2, (f"{name}/.github/workflows/3-apply-migration.yml", "CI: apply migration"))
-
-    tree_html = '<div style="background:#0a0c10;border:1px solid #1e2a3a;border-radius:8px;padding:16px;font-family:JetBrains Mono,monospace;font-size:12px">'
-    for path, desc in files:
-        parts = path.split("/")
-        indent = "&nbsp;" * ((len(parts) - 1) * 4)
-        fname = parts[-1]
-        color = "#00d4ff" if fname.endswith(".py") else "#10b981" if fname.endswith(".yml") else "#a78bfa" if fname.endswith((".sql",".yaml")) else "#e2e8f0"
-        tree_html += f'<div style="line-height:1.9">{indent}<span style="color:{color}">{fname}</span><span style="color:#475569;margin-left:12px;font-size:11px">{desc}</span></div>'
-    tree_html += '</div>'
-    st.markdown(tree_html, unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # File previews
-    with st.expander("Preview generated files"):
-        tab_names = ["Dockerfile", "build.sh", "template.yaml", "1-deploy-ecr.yml"]
-        tabs = st.tabs(tab_names)
-        with tabs[0]:
-            file_preview("Dockerfile", generate_dockerfile(s.runtime, s.arch))
-        with tabs[1]:
-            file_preview("build.sh", generate_build_sh(name, s.aws_region, ecr_repo, s.arch), "bash")
-        with tabs[2]:
-            file_preview("template.yaml", generate_cfn_template(name, s.aws_region, ecr_repo, s.arch,
-                s.memory_mb, s.timeout_sec, s.env_vars, schedule_expr, s.use_eventbridge, s.use_sns), "yaml")
-        with tabs[3]:
-            file_preview("1-deploy-ecr.yml", generate_workflow_ecr(name, s.aws_region, ecr_repo), "yaml")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Big download button
-    zip_bytes = build_zip()
-    col_dl, col_info = st.columns([1, 2])
-    with col_dl:
-        st.download_button(
-            label=f"⬇  Download {name}.zip",
-            data=zip_bytes,
-            file_name=f"{name}.zip",
-            mime="application/zip",
-        )
-    with col_info:
-        st.markdown(f"""
-        <div style="font-family:JetBrains Mono,monospace;font-size:12px;color:#64748b;padding-top:8px">
-            <div>Unzip → <code>git init && git push</code></div>
-            <div style="margin-top:4px">Then run GitHub Actions workflows in order: 1 → 2 → 3</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    col_back, _, col_new = st.columns([1, 4, 1])
-    with col_back:
-        if st.button("← Back"):
-            prev_step(); st.rerun()
-    with col_new:
-        if st.button("＋ New pipeline"):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.rerun()
-
-# ─── Router ────────────────────────────────────────────────────────────────────
-
-STEP_FNS = {
-    0: step_basics,
-    1: step_components,
-    2: step_schedule,
-    3: step_lambda_config,
-    4: step_lambda_code,
-    5: step_database,
-    6: step_generate,
-}
-
-current = st.session_state.step
-step_name = STEPS[current]
-
-# Header
-st.markdown(f"""
-<div style="display:flex;align-items:center;gap:12px;margin-bottom:28px;padding-bottom:20px;
-            border-bottom:1px solid #1e2a3a">
-    <div style="width:32px;height:32px;background:#00d4ff;color:#0a0c10;
-                border-radius:6px;display:flex;align-items:center;justify-content:center;
-                font-family:JetBrains Mono,monospace;font-size:13px;font-weight:700;
-                flex-shrink:0">{current+1}</div>
-    <div>
-        <div style="font-family:Syne,sans-serif;font-size:24px;font-weight:800;
-                    color:#e2e8f0;line-height:1">{step_name}</div>
-        <div style="font-family:JetBrains Mono,monospace;font-size:11px;
-                    color:#64748b;margin-top:3px">Step {current+1} of {len(STEPS)}</div>
-    </div>
-    <div style="flex:1"></div>
-    <div style="display:flex;gap:4px">
-        {''.join(['<div style="width:8px;height:8px;border-radius:50%;background:' + ('#00d4ff' if i==current else '#10b981' if i<current else '#1e2a3a') + '"></div>' for i in range(len(STEPS))])}
-    </div>
+<div class="file-tree">
+<span class="dir">{slug}/</span><br>
+├── <span class="key">serverless.yml</span> &nbsp;<span class="muted">← Lambda + triggers + IAM + SNS</span><br>
+├── lambda/<br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">handler.py</span><br>
+{helper_lines}│&nbsp;&nbsp;&nbsp;└── requirements.txt<br>
+├── <span class="key">Dockerfile</span><br>
+├── <span class="key">build.sh</span><br>
+{migration_line}├── .github/workflows/<br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">1-deploy-ecr.yml</span> &nbsp;<span class="muted">← build + push image</span><br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">2a-deploy-staging.yml</span> &nbsp;<span class="muted">← auto on push to main</span><br>
+│&nbsp;&nbsp;&nbsp;├── <span class="key">2b-deploy-prod.yml</span> &nbsp;<span class="muted">← manual trigger only</span><br>
+{"│&nbsp;&nbsp;&nbsp;└── <span class='key'>3-apply-migration.yml</span><br>" if create_migration else ""}└── README.md
 </div>
 """, unsafe_allow_html=True)
 
-fn = STEP_FNS.get(current, step_basics)
-fn()
+    preview_tabs = st.tabs(["serverless.yml", "Dockerfile", "build.sh", "GH: ECR", "GH: 2a staging", "GH: 2b prod", "README"])
+    with preview_tabs[0]: st.code(generate_serverless_yml(config), language="yaml")
+    with preview_tabs[1]: st.code(generate_dockerfile(config), language="dockerfile")
+    with preview_tabs[2]: st.code(generate_buildsh(config), language="bash")
+    with preview_tabs[3]: st.code(generate_github_deploy_ecr(config), language="yaml")
+    with preview_tabs[4]: st.code(generate_github_deploy_staging(config), language="yaml")
+    with preview_tabs[5]: st.code(generate_github_deploy_prod(config), language="yaml")
+    with preview_tabs[6]: st.markdown(generate_readme(config))
+
+    def build_zip(cfg) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            base = cfg["slug"]
+            zf.writestr(f"{base}/serverless.yml",            generate_serverless_yml(cfg))
+            zf.writestr(f"{base}/lambda/handler.py",         cfg["handler_code"])
+            zf.writestr(f"{base}/lambda/requirements.txt",   cfg["requirements_txt"])
+            zf.writestr(f"{base}/Dockerfile",                generate_dockerfile(cfg))
+            zf.writestr(f"{base}/build.sh",                  generate_buildsh(cfg))
+            if cfg["create_migration"]:
+                zf.writestr(f"{base}/migrations/V001__create_{cfg['db_table']}.sql", generate_migration_sql(cfg))
+            zf.writestr(f"{base}/.github/workflows/1-deploy-ecr.yml",     generate_github_deploy_ecr(cfg))
+            zf.writestr(f"{base}/.github/workflows/2a-deploy-staging.yml", generate_github_deploy_staging(cfg))
+            zf.writestr(f"{base}/.github/workflows/2b-deploy-prod.yml",    generate_github_deploy_prod(cfg))
+            if cfg["create_migration"]:
+                zf.writestr(f"{base}/.github/workflows/3-apply-migration.yml", generate_github_apply_migration(cfg))
+            zf.writestr(f"{base}/README.md", generate_readme(cfg))
+            for f in (uploaded_helpers or []):
+                f.seek(0)
+                zf.writestr(f"{base}/lambda/{f.name}", f.read())
+        buf.seek(0)
+        return buf.read()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    zip_bytes = build_zip(config)
+    st.download_button(label=f"⬇️  Download {slug}/ repo zip", data=zip_bytes, file_name=f"{slug}.zip", mime="application/zip", use_container_width=True)
+    st.markdown("""<div class="info-box" style="margin-top:14px;">
+<b>Quick start after download:</b><br>
+1. &nbsp;Run workflow <b>1 · Deploy ECR Image</b> from GitHub Actions<br>
+2. &nbsp;Run workflow <b>2a · Deploy → staging</b><br>
+3. &nbsp;Run workflow <b>2b · Deploy → prod</b> (manual, paste image tag from step 1)<br>
+4. &nbsp;(if RDS) Run workflow <b>3 · Apply Migration</b>
+</div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — CI/CD SETUP GUIDE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_cicd:
+
+    st.markdown("""
+<div style="font-family:'Syne',sans-serif;font-weight:800;font-size:20px;margin:10px 0 6px;">
+  🚀 Setting Up CI/CD on GitHub
+</div>
+<div style="color:#64748b;font-size:13px;margin-bottom:24px;">
+  One-time setup. After this, every push to <code>main</code> auto-deploys to staging,
+  then waits for your approval before touching prod.
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown("### How the full deploy flow works")
+    st.markdown("""
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0 28px;">
+  <div style="background:#111118;border:1px solid #1e1e2e;border-radius:10px;padding:14px;text-align:center;">
+    <div style="font-size:22px;margin-bottom:6px;">1&#xFE0F;&#x20E3;</div>
+    <div style="font-weight:700;font-size:12px;color:#e2e8f0;">Push to main</div>
+    <div style="color:#64748b;font-size:11px;margin-top:4px;">Engineer merges a PR or pushes a commit</div>
+  </div>
+  <div style="background:#111118;border:1px solid #7c3aed;border-radius:10px;padding:14px;text-align:center;">
+    <div style="font-size:22px;margin-bottom:6px;">2&#xFE0F;&#x20E3;</div>
+    <div style="font-weight:700;font-size:12px;color:#e2e8f0;">Build + staging</div>
+    <div style="color:#64748b;font-size:11px;margin-top:4px;">Docker → ECR → <code>sls deploy --stage staging</code></div>
+  </div>
+  <div style="background:#111118;border:1px solid #f59e0b;border-radius:10px;padding:14px;text-align:center;">
+    <div style="font-size:22px;margin-bottom:6px;">&#x23F8;&#xFE0F;</div>
+    <div style="font-weight:700;font-size:12px;color:#e2e8f0;">Manual gate</div>
+    <div style="color:#64748b;font-size:11px;margin-top:4px;">Run 2b manually when staging looks good</div>
+  </div>
+  <div style="background:#111118;border:1px solid #10b981;border-radius:10px;padding:14px;text-align:center;">
+    <div style="font-size:22px;margin-bottom:6px;">&#x1F680;</div>
+    <div style="font-weight:700;font-size:12px;color:#e2e8f0;">Prod deploy</div>
+    <div style="color:#64748b;font-size:11px;margin-top:4px;"><code>sls deploy --stage prod</code> runs</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown("### Step-by-step setup")
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">1</div>
+  <div class="cicd-step-title">Create an IAM Role for GitHub Actions using OIDC (no static AWS keys)</div>
+  <div class="cicd-step-body">GitHub proves its identity to AWS via OIDC federation. AWS issues short-lived credentials per workflow job — no <code>AWS_ACCESS_KEY_ID</code> stored in GitHub at all.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    with st.expander("📋  CloudFormation template — create the OIDC IAM Role (run this once)"):
+        st.code(generate_github_oidc_role_cfn(), language="yaml")
+        st.markdown("""<div class="info-box">
+Deploy with:<br>
+<code>aws cloudformation deploy --template-file oidc-role.yaml --stack-name github-actions-role --capabilities CAPABILITY_IAM --parameter-overrides GitHubOrg=YOUR_ORG GitHubRepo=YOUR_REPO</code><br><br>
+Copy the <b>RoleArn</b> from the Outputs — you need it in step 2.
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">2</div>
+  <div class="cicd-step-title">Add one GitHub Secret</div>
+  <div class="cicd-step-body">Repo → Settings → Secrets and variables → Actions → New repository secret.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown("""
+| Secret name | Value |
+|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | `arn:aws:iam::123456789012:role/GitHubActionsDeployRole` |
+
+That's the only secret. No `AWS_ACCESS_KEY_ID`, no `AWS_SECRET_ACCESS_KEY`.
+""")
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">3</div>
+  <div class="cicd-step-title">Store secrets in SSM Parameter Store</div>
+  <div class="cicd-step-body">Any env var prefixed with <code>ssm:</code> must exist in SSM before <code>sls deploy</code> runs — for both staging and prod paths.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.code("""\
+# Store for prod
+aws ssm put-parameter \\
+  --name "/app/prod/db-password" \\
+  --value "your-prod-password" \\
+  --type SecureString --region eu-west-1
+
+# Store for staging
+aws ssm put-parameter \\
+  --name "/app/staging/db-password" \\
+  --value "your-staging-password" \\
+  --type SecureString --region eu-west-1
+
+# Serverless resolves ${ssm:/app/prod/db-password} at deploy time per stage""", language="bash")
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">4</div>
+  <div class="cicd-step-title">Push the generated repo to GitHub</div>
+  <div class="cicd-step-body">Unzip the downloaded repo and push it to a new GitHub repo under your org.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.code("""\
+cd your-pipeline-name/
+git init && git add .
+git commit -m "feat: initial pipeline scaffold"
+git remote add origin git@github.com:YOUR_ORG/your-pipeline-name.git
+git push -u origin main""", language="bash")
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">5</div>
+  <div class="cicd-step-title">First deploy — run workflows 1 → 2a → 2b in order</div>
+  <div class="cicd-step-body">Go to repo → Actions tab. On first deploy run them manually via workflow_dispatch. After this, pushes to main trigger 1 and 2a automatically.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown("""
+| # | Workflow | Trigger | What it does |
+|---|---|---|---|
+| 1 | **Deploy ECR Image** | Push to `main` (lambda/ or Dockerfile changed) | Builds Docker image → pushes to ECR |
+| 2a | **Deploy → staging** | Push to `main` (any file) | Auto-deploys staging |
+| 2b | **Deploy → prod** | Manual only | Paste image tag from workflow 1 → deploys prod |
+| 3 | **Apply Migration** | Manual only (first deploy or new tables) | Runs `psql` migration against Postgres |
+""")
+
+    st.markdown("""<div class="warn-box">
+⚠️ <b>First deploy order matters:</b> 1 → 2a → 2b → 3.<br>
+Workflow 2a needs the ECR image to already exist before it can deploy the Lambda.
+</div>""", unsafe_allow_html=True)
+
+    st.markdown("""
+<div class="cicd-step">
+  <div class="cicd-step-num">6</div>
+  <div class="cicd-step-title">Day-to-day deploys — the full automated flow</div>
+  <div class="cicd-step-body">Push to main. Staging deploys automatically via 2a. Run 2b manually when you're ready to promote to prod.</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.code("""\
+git add lambda/handler.py
+git commit -m "fix: handle null block response"
+git push origin main
+
+# What happens automatically:
+# ① Docker image built + pushed to ECR             (~2 min)
+# ② sls deploy --stage staging                     (~1 min)
+# ③ ⏸  Check staging looks good
+# ④ Go to Actions → run 2b manually → sls deploy --stage prod  🚀""", language="bash")
+
+    st.markdown("---")
+    st.markdown("### IAM inline policy — `ServerlessDeployPolicy`")
+    st.markdown("Add this to your `GitHubActionsDeployRole`:")
+
+    st.code("""\
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*", "events:*", "scheduler:*", "sns:*", "sqs:*",
+        "apigateway:*", "xray:*", "cloudformation:*", "logs:*",
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath",
+        "iam:GetRole", "iam:CreateRole", "iam:DeleteRole",
+        "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy",
+        "iam:TagRole", "iam:UntagRole", "iam:GetRolePolicy",
+        "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
+        "ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage",
+        "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload", "ecr:PutImage",
+        "ecr:CreateRepository", "ecr:SetRepositoryPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:DeleteRepository", "ecr:DescribeRepositories", "ecr:ListImages"],
+      "Resource": "arn:aws:ecr:eu-west-1:289390447514:repository/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::289390447514:role/*",
+      "Condition": {
+        "StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}
+      }
+    }
+  ]
+}""", language="json")
+
+    st.markdown("---")
+    st.markdown("### Secrets Manager — DB credentials pattern")
+    st.markdown("""
+| Secret name | Keys |
+|---|---|
+| `your-pipeline/staging/creds` | `db_host`, `db_port`, `db_name`, `db_user`, `db_password` |
+| `your-pipeline/prod/creds` | `db_host`, `db_port`, `db_name`, `db_user`, `db_password` |
+""")
+
+    st.markdown("---")
+    st.markdown("### Useful `sls` CLI commands")
+    st.code("""\
+sls info --stage staging
+sls info --stage prod
+sls invoke --function main --stage staging --log
+sls invoke --function main --stage prod --log
+sls logs --function main --stage staging --tail
+sls logs --function main --stage prod --tail
+sls deploy --stage prod --noDeploy
+sls remove --stage staging
+sls remove --stage prod""", language="bash")

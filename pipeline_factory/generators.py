@@ -33,13 +33,36 @@ def generate_serverless_yml(cfg: dict) -> str:
 
     # ── Environment block ──────────────────────────────────────────────────────
     env_lines = []
-    if env_vars:
+    if sel.get("sns_publisher") and cfg.get("sns_publisher_base"):
         env_lines.append("    environment:")
+        env_lines.append("      SNS_TOPIC_ARN: !Ref PipelineOutputTopic")
+    if env_vars:
+        if not env_lines:
+            env_lines.append("    environment:")
         for ev in env_vars:
             if ev["key"]:
                 val = _ssm_ref(ev["value"])
                 env_lines.append(f"      {ev['key']}: {val}")
     env_block = "\n".join(env_lines)
+
+    # ── SNS publisher: snsTopicSuffix custom block + resource creation ────────
+    sns_custom_block = ""
+    sns_publisher_resources = ""
+    if sel.get("sns_publisher") and cfg.get("sns_publisher_base"):
+        base    = cfg["sns_publisher_base"]
+        s_sfx   = cfg.get("sns_publisher_suffix_staging", "_stg")
+        p_sfx   = cfg.get("sns_publisher_suffix_prod", "")
+        sns_custom_block = f"""\
+  snsTopicSuffix:
+    staging: "{s_sfx}"
+    {stage}: "{p_sfx}" """
+        sns_publisher_resources = f"""
+  Resources:
+    PipelineOutputTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: {base}${{{{self:custom.snsTopicSuffix.${{{{sls:stage}}}}}}}}
+        DisplayName: {base}${{{{self:custom.snsTopicSuffix.${{{{sls:stage}}}}}}}}"""
 
     # ── Events block — supports multiple triggers ──────────────────────────────
     event_lines = ["    events:"]
@@ -103,8 +126,8 @@ def generate_serverless_yml(cfg: dict) -> str:
     # ── IAM statements ────────────────────────────────────────────────────────
     iam_statements = [
         "        - Effect: Allow",
-        "          Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]",
-        f"          Resource: arn:aws:ssm:{region}:${{aws:accountId}}:parameter/*",
+        "          Action: [secretsmanager:GetSecretValue]",
+        f"          Resource: arn:aws:secretsmanager:{region}:${{aws:accountId}}:secret:*",
     ]
     if sel.get("xray"):
         iam_statements += [
@@ -133,11 +156,35 @@ def generate_serverless_yml(cfg: dict) -> str:
             "          Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]",
             f"          Resource: {cfg['sqs_arn']}",
         ]
+    if sel.get("sns_publisher") and cfg.get("sns_publisher_base"):
+        iam_statements += [
+            "        - Effect: Allow",
+            "          Action: [sns:Publish]",
+            "          Resource: !Ref PipelineOutputTopic",
+        ]
     iam_block = "\n".join(iam_statements)
 
     # ── Resources ─────────────────────────────────────────────────────────────
     resources_block = ""
-    if sel.get("sns_failure"):
+    if sel.get("sns_failure") and sel.get("sns_publisher") and cfg.get("sns_publisher_base"):
+        resources_block = f"""
+resources:
+{sns_publisher_resources.strip().replace('resources:', '').replace('  Resources:', '  Resources:')}
+    FailureAlertTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${{self:service}}-${{sls:stage}}-failure-alerts
+        DisplayName: "${{self:service}} Lambda Failure Alerts"
+
+  Outputs:
+    FailureAlertTopicArn:
+      Value: !Ref FailureAlertTopic
+      Export:
+        Name: ${{self:service}}-${{sls:stage}}-FailureAlertTopicArn"""
+    elif sel.get("sns_publisher") and cfg.get("sns_publisher_base"):
+        resources_block = f"""
+resources:{sns_publisher_resources.replace('resources:', '')}"""
+    elif sel.get("sns_failure"):
         resources_block = """
 resources:
   Resources:
@@ -195,7 +242,7 @@ custom:
   prune:
     automatic: true
     number: 3   # keep last 3 Lambda versions
-
+{sns_custom_block}
 functions:
   main:
     image:
@@ -219,26 +266,6 @@ functions:
 def generate_dockerfile(cfg: dict) -> str:
     runtime = cfg["python_runtime"]
     py_ver  = runtime.replace("python", "")
-
-    helper_assignments = cfg.get("helper_file_assignments", [])
-
-    # Split helpers into root-level files and sub-directory groups
-    root_helpers = [e["name"] for e in helper_assignments if not e.get("dir", "").strip("/")]
-    dir_helpers: dict[str, list[str]] = {}
-    for e in helper_assignments:
-        d = e.get("dir", "").strip("/")
-        if d:
-            dir_helpers.setdefault(d, []).append(e["name"])
-
-    # Build explicit COPY statements — one per file at root, one per directory for subdirs
-    copy_lines = ["# Copy handler + helper files", "COPY lambda/handler.py ."]
-    for fname in root_helpers:
-        copy_lines.append(f"COPY lambda/{fname} .")
-    for d in sorted(dir_helpers):
-        copy_lines.append(f"COPY lambda/{d}/ ./{d}/")
-
-    copy_block = "\n".join(copy_lines)
-
     return f"""\
 # ─────────────────────────────────────────────────────────────────────────────
 # {cfg['slug']} Lambda — Docker image  (Python {py_ver})
@@ -253,7 +280,8 @@ WORKDIR ${{LAMBDA_TASK_ROOT}}
 COPY lambda/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-{copy_block}
+# Copy handler + any helper files in lambda/
+COPY lambda/ .
 
 CMD ["handler.handler"]
 """
@@ -354,6 +382,9 @@ on:
         description: "Image tag (defaults to git SHA)"
         required: false
         default: ""
+  push:
+    branches: [main]
+    paths: ["lambda/**", "Dockerfile"]
 
 permissions:
   id-token: write
@@ -438,11 +469,14 @@ def generate_github_deploy_staging(cfg: dict) -> str:
     region = cfg['aws_region']
     return f"""\
 # 2a-deploy-staging.yml
-# Manually triggered from GitHub Actions → Run workflow.
-# Deploys to staging and smoke tests. If this passes, run 2b to go to prod.
-name: 2a · Deploy → staging (manual)
+# Triggers automatically on every push to main.
+# Deploys to staging. Once happy, run 2b manually to deploy to prod.
+name: 2a · Deploy → staging (auto)
 
 on:
+  push:
+    branches: [main]
+    paths: ["lambda/**", "Dockerfile", "serverless.yml"]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -486,9 +520,6 @@ jobs:
         run: sls deploy --stage staging --region {region} --verbose
         env:
           IMAGE_TAG: ${{{{ steps.tag.outputs.tag }}}}
-
-      - name: Smoke test staging
-        run: sls invoke --function main --stage staging --region {region} --log
 
       - name: Summary
         run: |
@@ -548,9 +579,6 @@ jobs:
         run: sls deploy --stage {prod_stage} --region {region} --verbose
         env:
           IMAGE_TAG: ${{{{ github.event.inputs.image_tag }}}}
-
-      - name: Smoke test prod
-        run: sls invoke --function main --stage {prod_stage} --region {region} --log
 
       - name: Summary
         run: |
